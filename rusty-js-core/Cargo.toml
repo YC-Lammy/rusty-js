@@ -1,0 +1,29 @@
+[package]
+name = "rusty-js-core"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+swc_ecma_ast = "*"
+swc_ecma_parser = "*"
+swc_common = "*"
+
+cranelift = "*"
+cranelift-module = "*"
+cranelift-native = "*"
+cranelift-jit = "*"
+
+string-interner = "*"
+lazy_static = "*"
+crossbeam-channel = "*"
+parking_lot = "*"
+lock_api = "*"
+
+num-traits = "*"
+
+corosensei = {version = "0.1", optional = true}
+
+[features]
+default = ["corosensei"]
