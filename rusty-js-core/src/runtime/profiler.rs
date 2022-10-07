@@ -1,15 +1,10 @@
-
-
 use std::collections::HashMap;
 
-
 pub type BytecodeLine = u64;
-pub struct Profiler{
-    results:HashMap<BytecodeLine, Vec<()>>
+pub struct Profiler {
+    results: HashMap<BytecodeLine, Vec<()>>,
 }
 
-impl Profiler{
-    pub fn speculate(&mut self, line:BytecodeLine, tys:()){
-        
-    }
+impl Profiler {
+    pub fn speculate(&mut self, line: BytecodeLine, tys: ()) {}
 }

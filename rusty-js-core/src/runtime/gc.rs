@@ -1,8 +1,7 @@
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum GcFlag{
+pub enum GcFlag {
     Used,
     Old,
     NotUsed,
-    Garbage
+    Garbage,
 }

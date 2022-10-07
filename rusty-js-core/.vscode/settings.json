@@ -1,0 +1,8 @@
+{
+    "files.associations": {
+        "Lexer.C": "cpp",
+        "Test.C": "cpp",
+        "Buffer.C": "cpp",
+        "Parser.C": "cpp"
+    }
+}

@@ -1,7 +1,9 @@
-pub mod strings;
-pub mod object;
-pub mod symbol;
-pub mod function;
-pub mod prop;
 pub mod class;
+pub mod function;
+pub mod object;
 pub mod promise;
+pub mod prop;
+mod proxy;
+mod regex;
+pub mod strings;
+pub mod symbol;

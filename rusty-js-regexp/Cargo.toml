@@ -1,0 +1,20 @@
+[package]
+name = "rusty-js-regexp"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+array_tool = "*"
+peg = "*"
+unicode-id-start = "*"
+
+lazy_static = "*"
+
+cranelift-native = "0.88.0"
+cranelift = "0.88.0"
+
+regress = "*"
+
+rusty-js-unicode = {version="*", path="../rusty-js-unicode"}

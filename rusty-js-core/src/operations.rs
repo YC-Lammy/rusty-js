@@ -1,22 +1,22 @@
+use std::borrow::Cow;
 
+use crate::bultins::object::JObject;
 use crate::bultins::promise::Promise;
-use crate::runtime::{
-    Runtime,
-    AsyncResult
-};
+use crate::fast_iter::FastIterator;
+use crate::runtime::{AsyncResult, FuncID, Runtime, TemplateID};
 use crate::types::JValue;
 
-pub fn Await(value:JValue) -> (JValue, bool){
-    if let Some(p) = value.as_promise(){
-        match p{
+pub fn Await(value: JValue) -> (JValue, bool) {
+    if let Some(p) = value.as_promise() {
+        match p {
             Promise::Fulfilled(v) => (*v, false),
             Promise::Rejected(v) => (*v, true),
             Promise::Pending { id } => {
                 let runtime = Runtime::current();
 
-                loop{
+                loop {
                     let re = runtime.to_mut().poll_async(*id, JValue::UNDEFINED);
-                    match re{
+                    match re {
                         AsyncResult::Err(e) => return (e, true),
                         AsyncResult::Return(r) => return (r, false),
                         // ignore yield value
@@ -28,7 +28,58 @@ pub fn Await(value:JValue) -> (JValue, bool){
                 }
             }
         }
-    } else{
-        return (value, false)
+    } else {
+        return (value, false);
     }
+}
+
+pub fn Yield(value: JValue) -> JValue {
+    let runtime = Runtime::current();
+    runtime.generator_executor.suspend(value)
+}
+
+pub unsafe fn spread(value: JValue, this: JValue, stack: *mut JValue) -> (*mut JValue, u32, bool) {
+    let iter = FastIterator::new(value, crate::bytecodes::LoopHint::For);
+
+    loop {
+        let (done, error, value) = iter.next(this, stack);
+        if done {
+            break;
+        }
+    }
+
+    todo!()
+}
+
+pub unsafe fn create_template(id: u32, args: *mut JValue, argc: u32, tagged: bool) -> JValue {
+    let args = std::slice::from_raw_parts_mut(args, argc as usize);
+    let runtime = Runtime::current();
+    let tpl = runtime.get_template(TemplateID(id));
+
+    if tagged {
+        let array = JObject::array();
+        for i in &tpl.strings {
+            array
+                .as_array()
+                .unwrap()
+                .push((Default::default(), JValue::String(i.as_str().into())))
+        }
+    }
+
+    let mut exprs = Vec::new();
+    for i in args {
+        if i.is_string() {
+            exprs.push(Cow::Borrowed(i.value.string.as_ref()));
+        } else {
+            exprs.push(Cow::Owned(i.to_string()))
+        };
+    }
+    tpl.create(&exprs)
+}
+
+pub unsafe fn create_function(id: u32, capture_stack: *mut JValue) -> JValue {
+    let runtime = Runtime::current();
+    let func = runtime.get_function(FuncID(id)).unwrap();
+    let ins = func.create_instance_with_capture(None, capture_stack);
+    JObject::with_function(ins).into()
 }

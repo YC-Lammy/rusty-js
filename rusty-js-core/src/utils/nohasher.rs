@@ -1,20 +1,14 @@
-
-
-use std::hash::{
-    Hasher,
-    BuildHasherDefault
-};
+use std::hash::{BuildHasherDefault, Hasher};
 
 pub type NoHasherBuilder = BuildHasherDefault<NoHasher>;
 
-pub struct NoHasher{
-    value:u64
+pub struct NoHasher {
+    value: u64,
 }
-
 
 impl Hasher for NoHasher {
     fn finish(&self) -> u64 {
-        return self.value
+        return self.value;
     }
 
     fn write(&mut self, bytes: &[u8]) {
@@ -70,7 +64,7 @@ impl Hasher for NoHasher {
     }
 }
 
-impl Default for NoHasher{
+impl Default for NoHasher {
     fn default() -> Self {
         Self { value: 0 }
     }

@@ -6,14 +6,13 @@ edition = "2021"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-swc_ecma_ast = "*"
-swc_ecma_parser = "*"
-swc_common = "*"
+swc_ecmascript = {version="0.203", features=["parser", "dep_graph", ]}
+swc_common = "0.29.0"
 
-cranelift = "*"
-cranelift-module = "*"
-cranelift-native = "*"
-cranelift-jit = "*"
+cranelift = "0.88.0"
+cranelift-module = "0.88.0"
+cranelift-native = "0.88.0"
+cranelift-jit = "0.88.0"
 
 string-interner = "*"
 lazy_static = "*"
@@ -22,8 +21,14 @@ parking_lot = "*"
 lock_api = "*"
 
 num-traits = "*"
-
+memmap2 = "*"
+unicode-id-start = "*"
+array_tool = "*"
 corosensei = {version = "0.1", optional = true}
+regress = {version = "*", optional = true}
+
+rusty-js-unicode = {version="*", path="../rusty-js-unicode"}
+rusty-js-regexp = {version="*", path="../rusty-js-regexp"}
 
 [features]
-default = ["corosensei"]
+default = ["corosensei", "regress"]
