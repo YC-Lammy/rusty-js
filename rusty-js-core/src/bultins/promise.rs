@@ -1,5 +1,5 @@
 use crate::runtime::AsyncId;
-use crate::{runtime::Runtime, types::JValue};
+use crate::types::JValue;
 
 #[derive(Clone)]
 pub enum Promise {
@@ -7,5 +7,3 @@ pub enum Promise {
     Fulfilled(JValue),
     Rejected(JValue),
 }
-
-impl Promise {}

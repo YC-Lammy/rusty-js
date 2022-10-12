@@ -6,8 +6,8 @@ use string_interner::DefaultBackend;
 use string_interner::StringInterner;
 
 lazy_static::lazy_static! {
-    static ref SymbolInterner:RwLock<StringInterner<DefaultBackend<usize>>> = RwLock::new(StringInterner::new());
-    static ref NameResolver:RwLock<HashMap<u32, usize>> = RwLock::new(Default::default());
+    static ref SYMBOL_INTERNER:RwLock<StringInterner<DefaultBackend<usize>>> = RwLock::new(StringInterner::new());
+    static ref NAME_RESOLVER:RwLock<HashMap<u32, usize>> = RwLock::new(Default::default());
 }
 
 #[cfg(target_pointer_width = "64")]
@@ -28,14 +28,14 @@ impl JSymbol {
     fn name(&self) -> &str {
         #[cfg(target_pointer_width = "64")]
         if self.name == 0 {
-            self.to_mut().name = NameResolver.read()[&self.id] as u32;
+            self.to_mut().name = NAME_RESOLVER.read()[&self.id] as u32;
         }
         #[cfg(target_pointer_width = "64")]
         let key = self.name as usize;
         #[cfg(target_pointer_width = "32")]
         let key = NameResolver.read()[&self.id];
 
-        let lock = ApiLock::read(&SymbolInterner);
+        let lock = ApiLock::read(&SYMBOL_INTERNER);
         let v = lock.resolve(key as usize).unwrap();
         unsafe { std::mem::transmute_copy(&v) }
     }

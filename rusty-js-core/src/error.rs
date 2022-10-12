@@ -1,4 +1,4 @@
-use std::{any::Any, fmt::Pointer, ops::Range, sync::Arc};
+use std::{any::Any, ops::Range, sync::Arc};
 
 use crate::types::JValue;
 
@@ -14,12 +14,13 @@ pub enum Error {
     InvalideIterator { msg: &'static str },
 
     TypeError(String),
+    SyntaxError(String),
     Value(JValue),
     User(Arc<dyn Any>),
 }
 
 impl std::fmt::Display for Error {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        self.fmt(f)
+        std::fmt::Debug::fmt(&self, f)
     }
 }

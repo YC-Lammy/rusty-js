@@ -1,6 +1,7 @@
 use std::collections::hash_map::DefaultHasher;
 use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
+use std::sync::Arc;
 
 use crate::error::Error;
 use crate::runtime::GcFlag;
@@ -9,8 +10,11 @@ use crate::types::JValue;
 
 use crate::utils::nohasher::NoHasherBuilder;
 
+use super::class::JSClassInstance;
+use super::typed_array::TypedArray;
 use super::function::JSFunctionInstance;
 use super::promise::Promise;
+use super::proxy::Proxy;
 use super::regex::RegExp;
 use super::strings::JString;
 use super::symbol::JSymbol;
@@ -40,30 +44,6 @@ where
     let mut h = DefaultHasher::new();
     v.hash(&mut h);
     h.finish()
-}
-
-#[macro_export]
-macro_rules! jobject_macro {
-    ($($key:tt : $value:expr),*) => {
-        {
-            let o = JObjectInner::new();
-            $(
-                o.to_mut().set_property($key, $value, std::ptr::null_mut());
-            )*
-            JObject{
-                inner:o
-            }
-        }
-    };
-    ($flag:expr; $($key:tt : $value:expr),*) => {
-        {
-            let o = JObjectInner::new();
-            $(
-                o.insert_property($key, $value, $flag);
-            )*
-            o.into()
-        }
-    };
 }
 
 #[derive(Clone, Copy)]
@@ -96,9 +76,27 @@ impl JObject {
     }
 
     pub fn array() -> Self {
-        let obj = JObjectInner::new();
-        obj.wrapped_value = JObjectValue::Array(Vec::new());
-        Self { inner: obj }
+        Self::with_value(JObjectValue::Array(Vec::new()))
+    }
+
+    pub fn with_array(a:Vec<(PropFlag, JValue)>) -> Self{
+        Self::with_value(JObjectValue::Array(a))
+    }
+
+    pub fn new_map() -> Self{
+        Self::with_value(JObjectValue::Map(Default::default()))
+    }
+
+    pub fn new_set() -> Self{
+        Self::with_value(JObjectValue::Set(Default::default()))
+    }
+
+    pub fn weak_set() -> Self{
+        Self::with_value(JObjectValue::WeakSet(Default::default()))
+    }
+
+    pub fn weak_map() -> Self{
+        Self::with_value(JObjectValue::WeakMap(Default::default()))
     }
 
     pub fn with_function(f: JSFunctionInstance) -> Self {
@@ -115,6 +113,14 @@ impl JObject {
 
     pub fn with_promise(p: Promise) -> Self {
         Self::with_value(JObjectValue::Promise(p))
+    }
+
+    pub fn with_regex(r:Arc<RegExp>) -> Self{
+        Self::with_value(JObjectValue::Regex(r))
+    }
+
+    pub fn with_number(n:f64) -> Self{
+        Self::with_value(JObjectValue::Number(n))
     }
 
     pub fn with_value(value: JObjectValue) -> Self {
@@ -145,9 +151,9 @@ impl JObject {
         self.as_function_instance().is_some()
     }
 
-    pub fn as_regexp(&self) -> Option<&mut RegExp> {
+    pub fn as_regexp(&self) -> Option<Arc<RegExp>> {
         match &mut self.inner.to_mut().wrapped_value {
-            JObjectValue::Regex(r) => Some(r),
+            JObjectValue::Regex(r) => Some(r.clone()),
             _ => None,
         }
     }
@@ -172,6 +178,21 @@ impl JObject {
             JObjectValue::Error(e) => Some(e),
             _ => None,
         }
+    }
+
+    pub fn is_error(&self) -> bool{
+        self.as_error().is_some()
+    }
+
+    pub fn as_number(&self) -> Option<f64>{
+        match &self.inner.wrapped_value {
+            JObjectValue::Number(n) => Some(*n),
+            _ => None
+        }
+    }
+
+    pub fn is_number(&self) -> bool{
+        self.as_number().is_some()
     }
 
     pub fn is_primitive(&self) -> bool {
@@ -270,7 +291,7 @@ impl JObject {
     }
 
     #[inline]
-    pub fn Call(
+    pub fn call(
         &self,
         runtime: &Runtime,
         this: JValue,
@@ -281,7 +302,7 @@ impl JObject {
 
         if let Some(f) = self.inner.wrapped_value.function() {
             
-            f.Call(runtime, this, stack, argc as usize)
+            f.call(runtime, this, stack, argc as usize)
         } else {
             (JValue::Error(Error::CallOnNonFunction), true)
         }
@@ -319,6 +340,13 @@ impl JObject {
                 cell.value.trace()
             }
         }
+
+        if let Some(p) = &self.inner.__proto__{
+            p.trace();
+        }
+
+        self.inner.wrapped_value.trace();
+
     }
 }
 
@@ -426,7 +454,7 @@ impl JObjectInner {
                 let this = JValue::Object(JObject { inner: self });
                 let runtime = Runtime::current();
 
-                let (re, error) = v.getsetter.0.inner.Call(&runtime, this, stack, 0);
+                let (re, error) = v.getsetter.0.inner.call(&runtime, this, stack, 0);
                 if error {
                     return (re, true);
                 }
@@ -434,7 +462,7 @@ impl JObjectInner {
                 let this = JValue::Object(JObject { inner: self });
                 let runtime = Runtime::current();
 
-                let (re, error) = v.getter.inner.Call(&runtime, this, stack, 0);
+                let (re, error) = v.getter.inner.call(&runtime, this, stack, 0);
                 if error {
                     return (re, true);
                 }
@@ -461,13 +489,20 @@ impl JObjectInner {
         value: JValue,
         stack: *mut JValue,
     ) -> (JValue, bool) {
-        if key == "__proto__" {
-            if value.is_object() {
-                self.__proto__ = Some(unsafe { value.value.object });
-            } else if value.is_null() {
-                self.__proto__ = None;
+
+        match key{
+            "__proto__" => {
+                if value.is_object() {
+                    self.__proto__ = Some(unsafe { value.value.object });
+                } else if value.is_null() {
+                    self.__proto__ = None;
+                }
+                return (JValue::UNDEFINED, false);
+            },
+            
+            _ => {
+
             }
-            return (JValue::UNDEFINED, false);
         }
 
         //let r = hash_(key);
@@ -492,7 +527,7 @@ impl JObjectInner {
 
                 *stack = value;
 
-                let (re, error) = v.getsetter.1.inner.Call(&runtime, this, stack, 1);
+                let (re, error) = v.getsetter.1.inner.call(&runtime, this, stack, 1);
                 if error {
                     return (re, true);
                 }
@@ -502,7 +537,7 @@ impl JObjectInner {
 
                 *stack = value;
 
-                let (re, error) = v.setter.inner.Call(&runtime, this, stack, 1);
+                let (re, error) = v.setter.inner.call(&runtime, this, stack, 1);
                 if error {
                     return (re, true);
                 }
@@ -547,7 +582,7 @@ impl JObjectInner {
         return h;
     }
 
-    pub fn Call(
+    pub fn call(
         &self,
         runtime: &Runtime,
         this: JValue,
@@ -555,7 +590,7 @@ impl JObjectInner {
         argc: usize,
     ) -> (JValue, bool) {
         if let Some(func) = self.wrapped_value.function() {
-            func.Call(runtime, this, stack, argc)
+            func.call(runtime, this, stack, argc)
         } else {
             (JValue::Error(Error::CallOnNonFunction), true)
         }
@@ -574,14 +609,29 @@ pub enum JObjectValue {
     String(JString),
     Number(f64),
     BigInt(i64),
+    Boolean(bool),
     Symbol(JSymbol),
 
     Array(Vec<(PropFlag, JValue)>),
     ArrayIterator(&'static JObject),
     Function(JSFunctionInstance),
+    Generator(()),
+    Class(JSClassInstance),
 
-    Regex(RegExp),
+    Regex(Arc<RegExp>),
     Promise(Promise),
+    Proxy(Proxy),
+
+    Map(HashMap<JValue, JValue>),
+    Set(HashMap<JValue, ()>),
+    WeakMap(HashMap<u64, JValue>),
+    WeakSet(HashMap<u64, ()>),
+
+    /// ArrayBuffers are shared
+    ArrayBuffer(Arc<Vec<u8>>),
+    DataView(()),
+
+    TypedArray(TypedArray<()>)
 }
 
 impl JObjectValue {
@@ -641,6 +691,46 @@ impl JObjectValue {
         match self {
             Self::Promise(p) => Some(p),
             _ => None,
+        }
+    }
+
+    pub unsafe fn trace(&self){
+        match self{
+            Self::Array(a) => {
+                for (_f, v) in a{
+                    v.trace();
+                }
+            },
+            Self::ArrayIterator(a) => {
+                a.trace();
+            },
+            Self::Function(f) => {
+                f.trace();
+            },
+            Self::Generator(g) => {
+
+            },
+            Self::Map(m) => {
+                for (key, v) in m{
+                    key.trace();
+                    v.trace();
+                }
+            },
+            Self::Proxy(p) => {
+                p.handler.trace();
+                p.target.trace();
+            },
+            Self::Set(s) => {
+                for (key, _) in s{
+                    key.trace();
+                }
+            },
+            Self::WeakMap(m) => {
+                for (_, v) in m{
+                    v.trace();
+                }
+            },
+            _ => {}
         }
     }
 }

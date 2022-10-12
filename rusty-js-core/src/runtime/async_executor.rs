@@ -54,7 +54,7 @@ impl<T: 'static> AsyncExecutor<T> {
         let id = self.next_id;
         self.next_id += 1;
 
-        let gn = Coroutine::new(move |yielder: &Yielder<T, T>, input: T| {
+        let gn = Coroutine::new(move |yielder: &Yielder<T, T>, _input: T| {
             let yielder_ptr = yielder as *const Yielder<T, T> as *const Yielder<(), ()>;
 
             let old = YIELDER.with(|y| {

@@ -67,7 +67,7 @@ pub struct Runtime {
 
     functions: Vec<Option<Arc<JSFunction>>>,
     classes: Vec<Option<Arc<JSClass>>>,
-    regexs: Vec<(String, String)>,
+    regexs: Vec<Arc<bultins::regex::RegExp>>,
     templates: Vec<bultins::strings::Template>,
 
     pub global: Option<JObject>,
@@ -338,6 +338,10 @@ impl Runtime {
         return ClassID((self.classes.len() - 1) as u32);
     }
 
+    pub(crate) fn get_class(&self, id:ClassID) -> Arc<JSClass>{
+        self.classes.get(id.0 as usize).unwrap().clone().unwrap()
+    }
+
     pub(crate) fn bind_class_constructor(&self, class_id: ClassID, func_id: FuncID) {
         let c = self.classes[class_id.0 as usize].clone().unwrap();
         c.to_mut().constructor = Some(self.get_function(func_id).unwrap());
@@ -477,15 +481,21 @@ impl Runtime {
     }
 
     #[inline]
-    pub fn register_regex(&mut self, reg: &str, flags: &str) -> RegexID {
-        self.regexs.push((reg.to_string(), flags.to_string()));
-        RegexID(self.regexs.len() as u32 - 1)
+    pub fn register_regex(&mut self, reg: &str, flags: &str) -> Result<RegexID, String> {
+        match bultins::regex::RegExp::with_flags(reg, flags){
+            Ok(v) => {
+                self.regexs.push(Arc::new(v));
+            },
+            Err(e) => return Err(e.to_string())
+        }
+        
+        Ok(RegexID(self.regexs.len() as u32 - 1))
     }
 
     #[inline]
-    pub fn get_regex(&self, id: RegexID) -> (&str, &str) {
+    pub fn get_regex(&self, id: RegexID) -> Arc<bultins::regex::RegExp> {
         let s = self.regexs.get(id.0 as usize).unwrap();
-        (&s.0, &s.1)
+        s.clone()
     }
 
     #[inline]

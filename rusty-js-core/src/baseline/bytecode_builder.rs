@@ -1186,7 +1186,14 @@ impl FunctionBuilder {
                     }
                 }
                 Lit::Regex(r) => {
-                    let id = self.runtime.to_mut().register_regex(&r.exp, &r.flags);
+                    let re = self.runtime.to_mut().register_regex(&r.exp, &r.flags);
+
+                    let id = match re{
+                        Ok(v) => v,
+                        Err(e) => {
+                            return Err(Error::SyntaxError(e))
+                        }
+                    };
                     self.bytecode.push(OpCode::CreateRegExp {
                         result: self.r1,
                         reg_id: id,

@@ -352,7 +352,7 @@ impl<'a> Interpreter<'a> {
                 let (v, error) = if self.is_global {
                     self.r[future].wait()
                 } else {
-                    operations::Await(self.r[future])
+                    operations::async_wait(self.r[future])
                 };
 
                 if error {
@@ -988,8 +988,9 @@ impl<'a> Interpreter<'a> {
                 self.r[result] = JValue::Object(JObject::new());
             }
             OpCode::CreateRegExp { result, reg_id } => {
-                todo!()
-            }
+                let r = self.runtime.get_regex(reg_id);
+                self.r[result] = JObject::with_regex(r).into();
+            },
             OpCode::CreateTemplate { result, id, tagged } => {
                 let offset = *self.args_offsets.last_mut().unwrap();
                 let stack = &mut self.stack[offset..];
@@ -1008,6 +1009,7 @@ impl<'a> Interpreter<'a> {
             }
 
             OpCode::CreateClass { result, class_id } => {
+                self.runtime.get_class(class_id);
                 todo!()
             }
             OpCode::ClassBindSuper { class, super_ } => {

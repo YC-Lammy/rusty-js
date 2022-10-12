@@ -5,6 +5,8 @@ use crate::runtime::Runtime;
 use crate::types::JValue;
 use crate::error::Error;
 
+mod bridge;
+
 macro_rules! debug {
     ($($arg:tt)*) => {
         $crate::debug::logging(&format!($($arg)*))
@@ -59,7 +61,12 @@ pub fn test_native_function() {
 
     runtime.clone().attach();
 
-    let func = runtime.create_native_function(|ctx, this, args| {
+    let a = std::sync::Arc::new(std::cell::Cell::new(0));
+
+    let a1 = a.clone();
+    let func = runtime.create_native_function(move|ctx, this, args| {
+
+        a1.set(a1.get() + 1);
         println!();
         println!("hello world!");
         Ok(JValue::UNDEFINED)
@@ -81,7 +88,11 @@ pub fn test_native_function() {
         }
     }
     let y = i();
-    y()
+    y();
+    for (i=0;i<9;i++){
+        hello();
+    }
+    return 0;
     "#,
         ).map_err(|e|{
             match e{
@@ -93,4 +104,6 @@ pub fn test_native_function() {
                 }
             };
         });
+
+    println!("{}", a.get());
 }

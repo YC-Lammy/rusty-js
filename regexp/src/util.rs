@@ -1,6 +1,10 @@
 pub struct DynamicBuffer(Vec<u8>);
 
 impl DynamicBuffer{
+    pub const fn new() -> Self{
+        DynamicBuffer(Vec::new())
+    }
+
     pub fn len(&self) -> usize{
         self.0.len()
     }

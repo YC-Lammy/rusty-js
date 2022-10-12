@@ -318,7 +318,7 @@ impl FunctionBuilderContextInner {
 
         let mut parent = self.parent.clone();
         let mut is_func_ctx = self.is_function_context;
-        let mut is_global= self.is_global_context;
+        let mut is_global;
         let mut need_capture = false;
 
         loop {

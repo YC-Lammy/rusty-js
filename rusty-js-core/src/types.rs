@@ -45,8 +45,13 @@ unsafe impl Send for JValue {}
 
 impl std::hash::Hash for JValue {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
-        state.write_usize(unsafe { std::mem::transmute(self.value) });
-        state.write_usize(self.type_pointer as *const _ as usize);
+        if self.is_string(){
+            unsafe{self.value.string.as_bytes().hash(state)}
+        } else{
+            state.write_usize(unsafe { std::mem::transmute(self.value) });
+            state.write_usize(self.type_pointer as *const _ as usize); 
+        }
+        
     }
 }
 
@@ -829,7 +834,7 @@ impl JValue {
         
         if self.is_object() {
             
-            self.value.object.Call(runtime, this, stack, argc)
+            self.value.object.call(runtime, this, stack, argc)
         } else {
             println!("call");
             (JValue::Error(Error::CallOnNonFunction), true)

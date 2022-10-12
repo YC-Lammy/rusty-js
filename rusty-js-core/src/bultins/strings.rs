@@ -24,14 +24,18 @@ pub(crate) struct JStringHeader {
     type_: JStringType,
 }
 
-/*
-    String::Combind:
-        JStringHeader | [*const JStringHeader;2]
-    String::String:
-        JStringHeader | [u8]...
-    String::Static:
-        JStringHeader | *const u8
-*/
+
+/// String::Combind:
+/// 
+///     JStringHeader | [*const JStringHeader;2]
+/// 
+/// String::String:
+/// 
+///     JStringHeader | [u8]...
+/// 
+/// String::Static:
+/// 
+///     JStringHeader | *const u8
 #[derive(Debug, Clone, Copy)]
 #[repr(C)]
 pub struct JString {

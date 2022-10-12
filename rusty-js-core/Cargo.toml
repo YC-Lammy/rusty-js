@@ -27,8 +27,5 @@ array_tool = "*"
 corosensei = {version = "0.1", optional = true}
 regress = {version = "*", optional = true}
 
-rusty-js-unicode = {version="*", path="../rusty-js-unicode"}
-rusty-js-regexp = {version="*", path="../rusty-js-regexp"}
-
 [features]
 default = ["corosensei", "regress"]

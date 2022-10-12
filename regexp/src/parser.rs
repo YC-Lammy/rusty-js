@@ -1,6 +1,6 @@
 use std::ops::Range;
 
-use crate::{util::DynamicBuffer, Flags, op::{Op, self}};
+use crate::{util::DynamicBuffer, Flags, op::{Op, self}, error::Error};
 
 
 
@@ -55,18 +55,20 @@ enum CharRangeEnum{
 }
 
 pub struct ParseState<'a>{
-    pattern:&'a [u8],
-    pattern_ptr:&'a [u8],
-    bytecode:DynamicBuffer,
-    is_utf16:bool,
-    flag:Flags,
-    ignore_case:bool,
-    capture_count:i32,
-    total_capture_count:i32,
-    has_named_captures:i32,
-    opaque:*const (),
-    group_names:Vec<Option<String>>,
-    tmp_buf:Vec<char>
+    pub pattern:&'a [u8],
+    pub pattern_ptr:&'a [u8],
+    pub bytecode:DynamicBuffer,
+    pub is_utf16:bool,
+    pub flag:Flags,
+    pub ignore_case:bool,
+    pub capture_count:i32,
+    pub total_capture_count:i32,
+    pub has_named_captures:i32,
+    pub opaque:*const (),
+    pub group_names:Vec<Option<String>>,
+    pub tmp_buf:Vec<char>,
+
+    pub error:Option<Error>
 }
 
 pub fn from_hex(c:char) -> i32{
@@ -1872,7 +1874,99 @@ impl<'a> ParseState<'a>{
         return 0;
     }
 
-    fn parse_disjunction(&mut self, is_backward:bool) -> i32{
+    fn parse_alternative(&mut self, is_backward:bool) -> i32{
+        let start = self.bytecode.len();
 
+        loop{
+            let p = self.pattern_ptr;
+            if p.len() == 0{
+                break;
+            }
+
+            if p[0] == b'|' || p[0] == b')'{
+                break;
+            }
+            let term_start = self.bytecode.len();
+            let ret = self.parse_term(is_backward);
+            if ret != 0{
+                return ret;
+            }
+
+            if is_backward{
+                let end = self.bytecode.len();
+                let term_size = end - term_start;
+                self.bytecode.resize(end + term_size, 0);
+                self.bytecode.as_mut_bytes().copy_within(start..end, start + term_size);
+                self.bytecode.as_mut_bytes().copy_within(end..end + term_size, start);
+            }
+        };
+
+        return 0;
+    }
+
+    pub fn parse_disjunction(&mut self, is_backward:bool) -> i32{
+        let start = self.bytecode.len();
+
+        if self.parse_alternative(is_backward) != 0{
+            return -1;
+        }
+
+        while self.pattern_ptr[0] == b'|'{
+            self.pattern_ptr = &self.pattern_ptr[1..];
+
+            let mut len = self.bytecode.len() - start;
+            self.bytecode.insert_u8(start, Op::SplitNextFirst as u8);
+            self.bytecode.insert_u32(start+1, len as u32 +5);
+
+            self.bytecode.push_u8(Op::Goto as u8);
+            self.bytecode.push_u32(0);
+
+            let pos = self.bytecode.len() - 4;
+
+            if self.parse_alternative(is_backward) != 0{
+                return -1;
+            }
+
+            len = self.bytecode.len() - (pos + 4);
+            self.bytecode.replace_u32(pos, len as u32);
+        };
+
+        return 0;
+    }
+
+    pub fn compute_stack_size(&self) -> usize{
+        let mut stack_size = 0;
+        let mut stack_size_max = 0;
+
+        let mut iter = self.bytecode.iter();
+
+        loop{
+            let op:Op = if let Some(p) = iter.get_next_u8(){
+                unsafe{std::mem::transmute(p)}
+            } else{
+                break;
+            };
+        
+            op.consume_iter(&mut iter);
+
+            match op{
+                Op::PushU32 |
+                Op::PushCharPos => {
+                    stack_size += 1;
+
+                    if stack_size >  stack_size_max{
+                        stack_size_max += 1;
+                    }
+                },
+                Op::Drop |
+                Op::BneCharPos => {
+                    assert!(stack_size > 0);
+                    stack_size -= 1;
+                },
+                _ => {}
+            }
+        };
+
+        return stack_size_max
     }
 }

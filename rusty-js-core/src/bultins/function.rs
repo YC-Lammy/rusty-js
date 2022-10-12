@@ -16,7 +16,7 @@ pub struct JSFunctionInstance {
 }
 
 impl JSFunctionInstance {
-    pub fn Call(
+    pub fn call(
         &self,
         runtime: &Runtime,
         this: JValue,
@@ -44,6 +44,21 @@ impl JSFunctionInstance {
         drop(need_drop);
         return re;
     }
+
+    pub unsafe fn trace(&self){
+        if let Some(v) = &self.this{
+            v.trace();
+        }
+
+        match &self.capture_stack{
+            CaptureStack::Allocated(a) => {
+                for i in a.as_data(){
+                    i.trace();
+                }
+            },
+            _ => {}
+        };
+    }
 }
 
 pub enum CaptureStack {
@@ -68,6 +83,10 @@ impl CaptureStackInner {
         let ptr = unsafe { std::alloc::alloc(Layout::array::<u8>(size).unwrap()) };
         let ptr = unsafe { (ptr as *mut CaptureStackInner).as_mut().unwrap() };
         *ptr = CaptureStackInner { rc: 0, alloc: size };
+
+        for i in ptr.as_data(){
+            *i = JValue::UNDEFINED;
+        }
         return ptr;
     }
 
@@ -148,7 +167,7 @@ pub enum JSFunction {
 
         call_count: u16,
         capture_stack_size: Option<u16>,
-        func: baseline::Function,
+        func: Arc<baseline::Function>,
         bytecodes: Vec<OpCode>,
     },
 
@@ -260,17 +279,27 @@ impl JSFunction {
                     cap.increment_count();
 
                     let p = runtime.to_mut().call_async(move || {
-                        let args = unsafe { std::slice::from_raw_parts(stack, argc) };
+
+                        let oldstack = stack;
                         let runtime = Runtime::current();
                         let stack = runtime.to_mut().get_async_stack(var_count as usize);
 
+                        unsafe{std::ptr::copy(oldstack, stack.as_mut_ptr(), argc)};
+
+                        let stack_ptr = stack.as_mut_ptr();
+                        let args = unsafe{std::slice::from_raw_parts(stack_ptr, argc)};
+
                         let mut intpr = crate::interpreter::Interpreter::function(
                             &runtime,
-                            stack,
+                            &mut stack[argc..],
                             cap.as_data(),
                         );
 
+                        runtime.user_own_value(this);
+
                         let re = intpr.run(this, args, &codes);
+
+                        runtime.user_drop_value(this);
 
                         // release the capture stack
                         cap.to_mut().decrement_count();
@@ -279,8 +308,9 @@ impl JSFunction {
                     });
 
                     (JObject::with_promise(p).into(), false)
+
                 } else {
-                    todo!()
+                    todo!("generator function")
                 }
             }
 
@@ -296,15 +326,57 @@ impl JSFunction {
                 if stack.is_null() {
                     panic!()
                 }
-
+                
                 *call_count += 1;
-                func.call(
-                    runtime,
-                    this,
-                    argc as u32,
-                    stack,
-                    capture_stack.as_mut_ptr(),
-                )
+
+                if !*is_async && !*is_generator{
+                    
+                    func.call(
+                        runtime,
+                        this,
+                        argc as u32,
+                        stack,
+                        capture_stack.as_mut_ptr(),
+                    )
+                } else if *is_async && !*is_generator{
+
+                    // make sure the CaptureStack live long enough
+                    let cap = CaptureStackInner::from_data_ptr(capture_stack.as_mut_ptr());
+                    cap.increment_count();
+
+                    let f = func.clone();
+                    let var_count = *var_count as usize;
+
+                    let p = runtime.to_mut().call_async(move ||{
+
+                        let oldstack = stack;
+                        let runtime = Runtime::current();
+                        let stack = runtime.to_mut().get_async_stack(var_count);
+
+                        unsafe{std::ptr::copy(oldstack, stack.as_mut_ptr(), argc)};
+
+                        runtime.user_own_value(this);
+
+                        let re = f.call(&runtime, this, argc as u32, stack.as_mut_ptr(), cap.as_data().as_mut_ptr());
+
+                        runtime.user_drop_value(this);
+
+                        // drop the capture stack
+                        cap.to_mut().decrement_count();
+
+                        if re.1{
+                            return Err(re.0)
+                        } else{
+                            return Ok(re.0)
+                        }
+                    });
+
+                    return (JObject::with_promise(p).into(), false)
+
+                } else{
+                    todo!("generator function")
+                }
+                
             }
 
             Self::Native(n) => {

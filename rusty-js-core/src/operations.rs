@@ -6,7 +6,7 @@ use crate::fast_iter::FastIterator;
 use crate::runtime::{AsyncResult, FuncID, Runtime, TemplateID};
 use crate::types::JValue;
 
-pub fn Await(value: JValue) -> (JValue, bool) {
+pub fn async_wait(value: JValue) -> (JValue, bool) {
     if let Some(p) = value.as_promise() {
         match p {
             Promise::Fulfilled(v) => (*v, false),
@@ -38,17 +38,30 @@ pub fn Yield(value: JValue) -> JValue {
     runtime.generator_executor.suspend(value)
 }
 
-pub unsafe fn spread(value: JValue, this: JValue, stack: *mut JValue) -> (*mut JValue, u32, bool) {
+pub unsafe fn spread(value: JValue, this: JValue, stack: *mut JValue) -> (*mut JValue, u64, bool) {
     let iter = FastIterator::new(value, crate::bytecodes::LoopHint::For);
 
+    let mut values = Vec::new();
     loop {
         let (done, error, value) = iter.next(this, stack);
+
+        if error{
+            return (Box::leak(Box::new(value)), 1, true)
+        }
+
+        values.push(value);
+
         if done {
+            FastIterator::drop_(iter);
             break;
         }
-    }
+    };
 
-    todo!()
+    let mut v = Vec::with_capacity(values.len());
+    v.extend_from_slice(&values);
+    let v = v.leak();
+    
+    return (v.as_mut_ptr(), v.len() as u64, false)
 }
 
 pub unsafe fn create_template(id: u32, args: *mut JValue, argc: u32, tagged: bool) -> JValue {
