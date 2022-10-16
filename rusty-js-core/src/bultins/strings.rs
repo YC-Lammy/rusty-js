@@ -8,7 +8,6 @@ use crate::{
     types::JValue,
 };
 
-use super::object::JObject;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum JStringType {
@@ -17,6 +16,8 @@ pub enum JStringType {
     Static,
 }
 
+// GcFlag must be put first
+#[repr(C)]
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct JStringHeader {
     flag: GcFlag,
@@ -138,6 +139,7 @@ impl AsRef<str> for JString {
 }
 
 impl JString {
+
     pub fn from_static(s: &'static str) -> JString {
         if s.len() == 0 {
             return JString {
@@ -156,6 +158,10 @@ impl JString {
             *p = s.as_ptr();
         };
         JString { value: ptr }
+    }
+
+    pub fn as_str(&self) -> &str{
+        self
     }
 
     fn combind(&self) {

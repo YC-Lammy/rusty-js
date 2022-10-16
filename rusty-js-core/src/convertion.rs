@@ -57,7 +57,7 @@ pub trait Convert<T> {
 
 impl<F> Convert<JSFunction> for F
 where
-    F: Fn(JSFuncContext, JValue, &[JValue]) -> Result<JValue, JValue> + 'static,
+    F: Fn(&JSFuncContext, JValue, &[JValue]) -> Result<JValue, JValue> + 'static,
 {
     fn convert(self) -> JSFunction {
         JSFunction::Native(Arc::new(self))

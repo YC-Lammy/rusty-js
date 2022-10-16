@@ -12,6 +12,8 @@ use crate::runtime::{FuncID, Runtime};
 use crate::types::JValue;
 use crate::{bultins, bytecodes::*};
 
+const SUPER_CONSTRUCTOR_VAR_NAME:&'static str = "SUPER CONSTRUCTOR";
+
 type Res = Result<(), Error>;
 
 struct Loop {
@@ -25,6 +27,7 @@ pub struct FunctionBuilder {
 
     is_async: bool,
     is_generator: bool,
+    args_len:u32,
 
     ctx: FunctionBuilderContext,
     loops: VecDeque<Loop>,
@@ -48,6 +51,7 @@ impl FunctionBuilder {
 
             is_async: false,
             is_generator: false,
+            args_len:0,
 
             ctx: FunctionBuilderContext::new(),
 
@@ -159,7 +163,7 @@ impl FunctionBuilder {
 
                 match d {
                     Decl::Class(class) => {
-                        let c = self.translate_class(&class.class)?;
+                        let c = self.translate_class(&class.class, Some(class.ident.sym.to_string()))?;
                         let code = self.ctx.declare(class.ident.to_id(), c, DeclareKind::Let);
                         self.bytecode.push(code);
                     }
@@ -184,8 +188,6 @@ impl FunctionBuilder {
                         self.bytecode.push(code);
                     }
                     Decl::Var(v) => {
-                        #[cfg(test)]
-                        println!("var");
 
                         for d in &v.decls {
                             self.translate_vardeclare(d, v.kind)?;
@@ -430,6 +432,8 @@ impl FunctionBuilder {
                         self.bytecode.push(OpCode::Jump { to: exit });
                     }
                 }
+                // incase there is not default
+                self.bytecode.push(OpCode::Jump { to: exit });
 
                 for (block, i) in bs {
                     if let Some(cmp) = &i.test {
@@ -519,7 +523,7 @@ impl FunctionBuilder {
                 self.end_loop();
             }
             Stmt::With(w) => {
-                todo!("With statment not supported")
+                todo!("with statment is deprecated.")
             }
         };
         Ok(())
@@ -1067,17 +1071,24 @@ impl FunctionBuilder {
                         }
                     }
                     Callee::Super(s) => {
-                        todo!()
+                        self.bytecode.push(OpCode::NewTarget { result: self.r1 });
+                        self.bytecode.push(OpCode::LoadThis { result: self.r2 });
+                        self.bytecode.push(OpCode::Call { 
+                            result: self.r1, 
+                            this: self.r2, 
+                            callee: self.r1, 
+                            stack_offset: self.ctx.current_stack_offset()
+                        });
                     }
                     Callee::Import(i) => {
-                        todo!()
+                        todo!("dynamic import")
                     }
                 }
 
                 self.try_check_error(self.r1);
             }
             Expr::Class(c) => {
-                self.translate_class(&c.class)?;
+                self.translate_class(&c.class, c.ident.as_ref().map(|v|v.sym.to_string()))?;
             }
             Expr::Cond(c) => {
                 // test ? a: b
@@ -1162,7 +1173,7 @@ impl FunctionBuilder {
                     }
                 }
                 Lit::JSXText(j) => {
-                    todo!()
+                    panic!("jsx text not supported")
                 }
                 Lit::Null(n) => {
                     self.bytecode.push(OpCode::LoadNull { result: self.r1 });
@@ -1249,10 +1260,13 @@ impl FunctionBuilder {
             }
             Expr::MetaProp(m) => {
                 match m.kind {
-                    MetaPropKind::ImportMeta => {}
-                    MetaPropKind::NewTarget => {}
+                    MetaPropKind::ImportMeta => {
+                        self.bytecode.push(OpCode::ImportMeta { result: self.r1 });
+                    }
+                    MetaPropKind::NewTarget => {
+                        self.bytecode.push(OpCode::NewTarget { result: self.r1 });
+                    }
                 };
-                todo!("meta prop {}", m.kind)
             }
             Expr::New(n) => {
                 if let Some(args) = &n.args {
@@ -1278,8 +1292,8 @@ impl FunctionBuilder {
                     match prop {
                         PropOrSpread::Prop(p) => match p.as_ref() {
                             Prop::Assign(a) => {
-                                unimplemented!("invalid object literal")
-                            }
+                                unreachable!("invalid object literal")
+                            },
                             Prop::Getter(g) => {
                                 let mut builder = FunctionBuilder::new_with_context(
                                     self.runtime.clone(),
@@ -1304,14 +1318,59 @@ impl FunctionBuilder {
 
                                 let key = self.propname_to_str(&g.key);
                                 let id = self.runtime.register_field_name(&key);
+
+                                // read the object
+                                self.bytecode.push(OpCode::ReadTemp { value: self.r3 });
+
                                 self.bytecode.push(OpCode::BindGetter {
                                     obj: self.r3,
                                     field_id: id,
                                     getter: self.r2,
                                 });
+                            },
+                            Prop::KeyValue(k) => {
+                                let v = self.translate_expr(&k.value)?;
+
+                                let key = self.propname_to_str(&k.key);
+                                let id = self.runtime.register_field_name(&key);
+
+                                // read the object
+                                self.bytecode.push(OpCode::ReadTemp { value: self.r3 });
+                                self.bytecode.push(OpCode::WriteFieldStatic { 
+                                    obj_value: (self.r3, v).into(), 
+                                    field_id: id, 
+                                    stack_offset: self.ctx.current_stack_offset()
+                                });
                             }
-                            Prop::KeyValue(k) => {}
-                            Prop::Method(m) => {}
+                            Prop::Method(m) => {
+                                let mut builder = FunctionBuilder::new_with_context(
+                                    self.runtime.clone(),
+                                    self.ctx.clone(),
+                                    false,
+                                    false,
+                                );
+
+                                builder.build_function(&m.function)?;
+                                let id = builder.finish()?;
+
+                                self.bytecode.extend(self.ctx.need_done());
+                                self.bytecode.push(OpCode::CreateFunction {
+                                    result: self.r2,
+                                    id: id,
+                                });
+
+                                let key = self.propname_to_str(&m.key);
+                                let id = self.runtime.register_field_name(&key);
+
+                                // read the object
+                                self.bytecode.push(OpCode::ReadTemp { value: self.r3 });
+
+                                self.bytecode.push(OpCode::WriteFieldStatic { 
+                                    obj_value: (self.r3, self.r2).into(), 
+                                    field_id: id, 
+                                    stack_offset: self.ctx.current_stack_offset()
+                                });
+                            },
                             Prop::Setter(s) => {
                                 let mut builder = FunctionBuilder::new_with_context(
                                     self.runtime.clone(),
@@ -1337,6 +1396,9 @@ impl FunctionBuilder {
 
                                 let key = self.propname_to_str(&s.key);
                                 let id = self.runtime.register_field_name(&key);
+
+                                // read the object
+                                self.bytecode.push(OpCode::ReadTemp { value: self.r3 });
                                 self.bytecode.push(OpCode::BindSetter {
                                     obj: self.r3,
                                     field_id: id,
@@ -1346,6 +1408,10 @@ impl FunctionBuilder {
                             Prop::Shorthand(s) => {
                                 self.bytecode.push(self.ctx.get(&s.to_id(), self.r2));
                                 let id = self.runtime.register_field_name(&s.sym);
+
+                                // read the object
+                                self.bytecode.push(OpCode::ReadTemp { value: self.r3 });
+
                                 self.bytecode.push(OpCode::WriteFieldStatic {
                                     obj_value: (self.r3, self.r2).into(),
                                     field_id: id,
@@ -1354,16 +1420,16 @@ impl FunctionBuilder {
                             }
                         },
                         PropOrSpread::Spread(s) => {
-                            todo!()
+                            let e = self.translate_expr(&s.expr)?;
+                            self.bytecode.push(OpCode::ReadTemp { value: self.r3 });
+                            self.bytecode.push(OpCode::ExtendObject { obj: self.r3, from: e });
                         }
                     };
-                }
+                };
+                self.bytecode.push(OpCode::ReadTemp { value: self.r1 });
                 self.bytecode.push(OpCode::ReleaseTemp);
-                self.bytecode.push(OpCode::Mov {
-                    from: self.r3,
-                    to: self.r1,
-                })
-            }
+            },
+
             Expr::OptChain(o) => match &o.base {
                 OptChainBase::Member(m) => {
                     let obj = self.translate_expr(&m.obj)?;
@@ -1452,10 +1518,28 @@ impl FunctionBuilder {
             }
             Expr::SuperProp(s) => match &s.prop {
                 SuperProp::Ident(i) => {
-                    todo!()
+                    let id = self.runtime.register_field_name(&i.sym);
+
+                    // capture the constructor
+                    self.bytecode.push(self.ctx.get(&(swc_atoms::JsWord::from(SUPER_CONSTRUCTOR_VAR_NAME), Default::default()), self.r2));
+
+                    self.bytecode.push(OpCode::ReadSuperFieldStatic { 
+                        constructor_result:(self.r2, self.r1).into(),
+                        field_id: id, 
+                        stack_offset: self.ctx.current_stack_offset()
+                    });
                 }
                 SuperProp::Computed(c) => {
-                    todo!()
+                    let v = self.translate_expr(&c.expr)?;
+                    
+                    // capture the constructor
+                    self.bytecode.push(self.ctx.get(&(swc_atoms::JsWord::from(SUPER_CONSTRUCTOR_VAR_NAME), Default::default()), self.r2));
+
+                    self.bytecode.push(OpCode::ReadSuperField { 
+                        constructor_result:(self.r2, self.r1).into(),
+                        field: v, 
+                        stack_offset: self.ctx.current_stack_offset(),
+                    });
                 }
             },
 
@@ -1469,10 +1553,23 @@ impl FunctionBuilder {
                     len: t.exprs.len() as u32,
                 });
 
+                let base = self.ctx.current_stack_offset();
+                let mut count = 0;
                 for i in exprs {
                     let v = self.translate_expr(&i)?;
-                    self.bytecode.push(OpCode::PushArg { value: v });
-                }
+                    self.bytecode.push(OpCode::PushArg { 
+                        value: v, 
+                        stack_offset: base + count as u16 
+                    });
+                    self.ctx.increment_stack_offset();
+                    count += 1;
+                };
+
+                self.ctx.decrease_stack_offset(count);
+                self.bytecode.push(OpCode::FinishArgs { 
+                    base_stack_offset: base, 
+                    len: count as u16
+                });
 
                 let mut strs = Vec::new();
                 for i in &t.quasis {
@@ -1490,6 +1587,8 @@ impl FunctionBuilder {
                     id,
                     tagged: false,
                 });
+
+                
             }
             Expr::TaggedTpl(t) => {
                 let exprs = t.tpl.exprs.iter();
@@ -1500,12 +1599,26 @@ impl FunctionBuilder {
                 });
 
                 let tag = self.translate_expr(&t.tag)?;
-                self.bytecode.push(OpCode::PushArg { value: tag });
+                let base = self.ctx.current_stack_offset();
 
+                self.bytecode.push(OpCode::PushArg { value: tag, stack_offset:base });
+
+                
+                self.ctx.increment_stack_offset();
+
+                let mut count = 1;
                 for i in exprs {
                     let v = self.translate_expr(&i)?;
-                    self.bytecode.push(OpCode::PushArg { value: v });
-                }
+                    self.bytecode.push(OpCode::PushArg { value: v , stack_offset:base + count as u16});
+                    self.ctx.increment_stack_offset();
+                    count += 1;
+                };
+
+                self.ctx.decrease_stack_offset(count);
+                self.bytecode.push(OpCode::FinishArgs { 
+                    base_stack_offset: base, 
+                    len: count as u16
+                });
 
                 let mut strs = Vec::new();
                 for i in &t.tpl.quasis {
@@ -1523,6 +1636,8 @@ impl FunctionBuilder {
                     id,
                     tagged: true,
                 });
+
+                
             }
             Expr::Unary(u) => {
                 let arg = self.translate_expr(&u.arg)?;
@@ -1686,8 +1801,8 @@ impl FunctionBuilder {
         return Ok(self.r1);
     }
 
-    fn translate_class(&mut self, class: &Class) -> Result<Register, Error> {
-        let class_id = self.runtime.new_class();
+    fn translate_class(&mut self, class: &Class, name:Option<String>) -> Result<Register, Error> {
+        let class_id = self.runtime.new_class(name.unwrap_or(String::new()));
 
         let sup = if let Some(s) = &class.super_class {
             let i = self.translate_expr(s)?;
@@ -1706,6 +1821,9 @@ impl FunctionBuilder {
             result: self.r3,
             class_id,
         });
+
+        // workaround: declare a builtin variable to be captured
+        self.bytecode.push(self.ctx.declare((swc_atoms::JsWord::from(SUPER_CONSTRUCTOR_VAR_NAME), swc_common::SyntaxContext::empty()), self.r3, DeclareKind::Var));
 
         if sup {
             self.bytecode.push(OpCode::ClassBindSuper {
@@ -1951,12 +2069,14 @@ impl FunctionBuilder {
     }
 
     fn translate_param(&mut self, param: &Param, index: u32) -> Result<(), Error> {
-        #[cfg(test)]
-        println!("translate param {}", index);
         self.translate_param_pat(&param.pat, index)
     }
 
     fn translate_param_pat(&mut self, pat: &Pat, index: u32) -> Result<(), Error> {
+        if self.args_len <= index{
+            self.args_len = index + 1;
+        }
+
         self.bytecode.push(OpCode::ReadParam {
             result: self.r1,
             index: index,
@@ -2005,8 +2125,89 @@ impl FunctionBuilder {
             }
 
             Pat::Expr(e) => {
-                todo!("expression assign pattern")
-            }
+
+                self.bytecode.push(OpCode::StoreTemp { value: value });
+
+                match e.as_ref(){
+                    Expr::Member(m) => {
+                        let obj = self.translate_expr(&m.obj)?;
+
+                        match &m.prop {
+                            MemberProp::Ident(i) => {
+                                self.bytecode.push(OpCode::ReadTemp { value: self.r3 });
+
+                                let id = self.runtime.register_field_name(&i.sym);
+
+                                self.bytecode.push(OpCode::WriteFieldStatic {
+                                    obj_value: (obj, self.r3).into(),
+                                    field_id: id,
+                                    stack_offset: self.ctx.current_stack_offset(),
+                                });
+                            }
+                            MemberProp::PrivateName(p) => {
+                                self.bytecode.push(OpCode::ReadTemp { value: self.r3 });
+
+                                let id = self
+                                    .runtime
+                                    .register_field_name(&format!("#{}", p.id.sym));
+
+                                self.bytecode.push(OpCode::WriteFieldStatic {
+                                    obj_value: (obj, self.r3).into(),
+                                    field_id: id,
+                                    stack_offset: self.ctx.current_stack_offset(),
+                                });
+                            }
+                            MemberProp::Computed(c) => {
+                                let field = self.translate_expr(&c.expr)?;
+                                self.bytecode.push(OpCode::ReadTemp { value: self.r3 });
+
+                                self.bytecode.push(OpCode::WriteField {
+                                    obj: obj,
+                                    field,
+                                    value: self.r3,
+                                    stack_offset: self.ctx.current_stack_offset(),
+                                });
+                            }
+                        };
+                    },
+                    Expr::SuperProp(p) => {
+                        match &p.prop{
+                            SuperProp::Ident(i) => {
+                                // capture the constructor
+                                self.bytecode.push(self.ctx.get(&(swc_atoms::JsWord::from(SUPER_CONSTRUCTOR_VAR_NAME), Default::default()), self.r2));
+                                self.bytecode.push(OpCode::ReadTemp { value: self.r3 });
+
+                                let key = self.runtime.register_field_name(&i.sym);
+
+                                self.bytecode.push(OpCode::WriteSuperFieldStatic { 
+                                    constructor_value:(self.r2, self.r3).into(),
+                                    field: key, 
+                                    stack_offset: self.ctx.current_stack_offset(),
+                                });
+
+                            },
+                            SuperProp::Computed(c) => {
+                                let prop = self.translate_expr(&c.expr)?;
+                                // capture the constructor
+                                self.bytecode.push(self.ctx.get(&(swc_atoms::JsWord::from(SUPER_CONSTRUCTOR_VAR_NAME), Default::default()), self.r2));
+                                self.bytecode.push(OpCode::ReadTemp { value: self.r3 });
+                                
+                                self.bytecode.push(OpCode::WriteSuperField { 
+                                    constructor_value: (self.r2, self.r3).into(),
+                                    field: prop,
+                                    stack_offset: self.ctx.current_stack_offset(),
+                                });
+
+                            }
+                        }
+                    },
+                    e => todo!("expression pattern assign {:#?}", e),
+                };
+
+                self.bytecode.push(OpCode::ReadTemp { value: self.r1 });
+                self.bytecode.push(OpCode::ReleaseTemp);
+                Ok(self.r1)
+            },
 
             Pat::Invalid(_i) => {
                 #[cfg(test)]
@@ -2123,16 +2324,33 @@ impl FunctionBuilder {
             len: args.len() as u32,
         });
 
+        let base = self.ctx.current_stack_offset();
+        let mut count = 0;
+        
         for arg in args {
             let a = self.translate_expr(&arg.expr)?;
             if arg.spread.is_some() {
-                self.bytecode.push(OpCode::PushArgSpread { value: a });
+                self.bytecode.push(OpCode::PushArgSpread { 
+                    value: a,
+                    stack_offset: base + count
+                });
             } else {
-                self.bytecode.push(OpCode::PushArg { value: a });
+                self.bytecode.push(OpCode::PushArg { 
+                    value: a,
+                    stack_offset: base + count
+                });
             }
+            count +=  1;
+
+            self.ctx.increment_stack_offset();
         }
 
-        self.bytecode.push(OpCode::FinishArgs);
+        self.ctx.decrease_stack_offset(args.len());
+
+        self.bytecode.push(OpCode::FinishArgs{
+            base_stack_offset:base,
+            len:args.len() as u16,
+        });
         Ok(())
     }
 
@@ -2153,9 +2371,11 @@ impl FunctionBuilder {
             .push(OpCode::LoadUndefined { result: self.r1 });
         self.bytecode.push(OpCode::Return { value: self.r1 });
         self.bytecode.extend(self.ctx.need_done());
+        
         let id = self.runtime.new_function(Arc::new(JSFunction::ByteCodes {
             is_async: self.is_async,
             is_generator: self.is_generator,
+            args_len:self.args_len as _,
             var_count: self.ctx.max_stack_offset(),
             call_count: 0,
             capture_stack_size: self.ctx.capture_len(),

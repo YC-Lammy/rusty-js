@@ -163,6 +163,14 @@ impl FunctionBuilderContext {
         self.inner.stack_offset
     }
 
+    pub fn increment_stack_offset(&self){
+        self.inner.to_mut().stack_offset += 1;
+    }
+
+    pub fn decrease_stack_offset(&self, n:usize){
+        self.inner.to_mut().stack_offset -= n as u16;
+    }
+
     pub fn max_stack_offset(&self) -> StackOffset {
         self.inner.max_stack_offset
     }

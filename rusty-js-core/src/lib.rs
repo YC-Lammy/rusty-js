@@ -15,7 +15,28 @@ mod utils;
 
 mod debug;
 
+mod type_script;
 
 pub use runtime::{
-    Runtime
+    Runtime,
+    FuncID,
+    ClassID,
+    ConstID,
+    RegexID,
+    StringID,
+    TemplateID
+};
+
+pub use bultins::{
+    object::JObject,
+    object_builder::ObjectBuilder,
+    function::{
+        JSFuncContext,
+    },
+    regex,
+    promise::Promise,
+    proxy::Proxy,
+    strings::JString,
+    symbol::JSymbol,
+    typed_array::TypedArray
 };

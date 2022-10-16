@@ -67,7 +67,7 @@ pub fn test_native_function() {
     let func = runtime.create_native_function(move|ctx, this, args| {
 
         a1.set(a1.get() + 1);
-        println!();
+        println!("{:#?}", args.get(0).map(|v|v.get_property_str("o")));
         println!("hello world!");
         Ok(JValue::UNDEFINED)
     });
@@ -92,7 +92,8 @@ pub fn test_native_function() {
     for (i=0;i<9;i++){
         hello();
     }
-    return 0;
+    a = {p:0, o:9};
+    hello(a)
     "#,
         ).map_err(|e|{
             match e{

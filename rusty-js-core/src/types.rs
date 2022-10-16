@@ -129,7 +129,7 @@ pub trait JSValuable{
     unsafe fn lt(value:JValueUnion, rhs:JValue) -> (JValue, bool);
     unsafe fn lteq(value:JValueUnion, rhs:JValue) -> (JValue, bool);
 
-    unsafe fn instanceOf(value:JValueUnion, rhs:JValue) -> (JValue, bool);
+    unsafe fn instance_of(value:JValueUnion, rhs:JValue) -> (JValue, bool);
     unsafe fn In(value:JValueUnion, rhs:JValue) -> (JValue, bool);
 
     unsafe fn set(obj:JValueUnion, key:JValue, value:JValue) -> (JValue, bool);
@@ -163,7 +163,7 @@ pub struct JTypeVtable {
     lt: unsafe fn(JValueUnion, JValue) -> (JValue, bool),
     lteq: unsafe fn(JValueUnion, JValue) -> (JValue, bool),
 
-    instanceOf: unsafe fn(JValueUnion, JValue) -> (JValue, bool),
+    instance_of: unsafe fn(JValueUnion, JValue) -> (JValue, bool),
     /// fn (obj, field) -> (result, error)
     In: unsafe fn(JValueUnion, JValue) -> (JValue, bool),
 }
@@ -243,40 +243,12 @@ impl JTypeVtable {
         (&Self::T.lteq as *const _ as usize - &Self::T as *const _ as usize) as i32
     }
 
-    pub fn offset_instanceOf() -> i32 {
-        (&Self::T.instanceOf as *const _ as usize - &Self::T as *const _ as usize) as i32
+    pub fn offset_instance_of() -> i32 {
+        (&Self::T.instance_of as *const _ as usize - &Self::T as *const _ as usize) as i32
     }
 
     pub fn offset_In() -> i32 {
         (&Self::T.In as *const _ as usize - &Self::T as *const _ as usize) as i32
-    }
-}
-
-impl Default for JTypeVtable {
-    fn default() -> Self {
-        unsafe {
-            Self {
-                add: std::mem::transmute::<usize, _>(0),
-                sub: std::mem::transmute::<usize, _>(0),
-                mul: std::mem::transmute::<usize, _>(0),
-                div: std::mem::transmute::<usize, _>(0),
-                rem: std::mem::transmute::<usize, _>(0),
-                exp: std::mem::transmute::<usize, _>(0),
-                eqeq: std::mem::transmute::<usize, _>(0),
-                noteq: std::mem::transmute::<usize, _>(0),
-                set: std::mem::transmute::<usize, _>(0),
-                set_static: std::mem::transmute::<usize, _>(0),
-                get: std::mem::transmute::<usize, _>(0),
-                get_static: std::mem::transmute::<usize, _>(0),
-                remove_key_static: std::mem::transmute::<usize, _>(0),
-                gt: std::mem::transmute::<usize, _>(0),
-                gteq: std::mem::transmute::<usize, _>(0),
-                lt: std::mem::transmute::<usize, _>(0),
-                lteq: std::mem::transmute::<usize, _>(0),
-                instanceOf: std::mem::transmute::<usize, _>(0),
-                In: std::mem::transmute::<usize, _>(0),
-            }
-        }
     }
 }
 
@@ -294,13 +266,13 @@ const NULL_TYPE_POINTER: JTypeVtable = JTypeVtable {
     lt: null::lt,
     lteq: null::lteq,
 
-    get: notObject::get,
-    get_static: notObject::get_static,
-    set: notObject::set,
-    set_static: notObject::set_static,
-    remove_key_static: notObject::remove_key_static,
-    instanceOf: notObject::instanceOf,
-    In: notObject::In,
+    get: not_object::get,
+    get_static: not_object::get_static,
+    set: not_object::set,
+    set_static: not_object::set_static,
+    remove_key_static: not_object::remove_key_static,
+    instance_of: not_object::instance_of,
+    In: not_object::In,
 };
 
 const UNDEFINED_TYPE_POINTER: JTypeVtable = JTypeVtable {
@@ -317,13 +289,13 @@ const UNDEFINED_TYPE_POINTER: JTypeVtable = JTypeVtable {
     lt: undefined::lt,
     lteq: undefined::lteq,
 
-    get: notObject::get,
-    get_static: notObject::get_static,
-    set: notObject::set,
-    set_static: notObject::set_static,
-    remove_key_static: notObject::remove_key_static,
-    instanceOf: notObject::instanceOf,
-    In: notObject::In,
+    get: not_object::get,
+    get_static: not_object::get_static,
+    set: not_object::set,
+    set_static: not_object::set_static,
+    remove_key_static: not_object::remove_key_static,
+    instance_of: not_object::instance_of,
+    In: not_object::In,
 };
 
 const REAL_UNDEFINED_TYPE_POINTER: JTypeVtable = JTypeVtable {
@@ -344,13 +316,13 @@ const TRUE_TYPE_POINTER: JTypeVtable = JTypeVtable {
     lt: true_::lt,
     lteq: true_::lteq,
 
-    get: notObject::get,
-    get_static: notObject::get_static,
-    set: notObject::set,
-    set_static: notObject::set_static,
-    remove_key_static: notObject::remove_key_static,
-    instanceOf: notObject::instanceOf,
-    In: notObject::In,
+    get: not_object::get,
+    get_static: not_object::get_static,
+    set: not_object::set,
+    set_static: not_object::set_static,
+    remove_key_static: not_object::remove_key_static,
+    instance_of: not_object::instance_of,
+    In: not_object::In,
 };
 
 const FALSE_TYPE_POINTER: JTypeVtable = JTypeVtable {
@@ -367,13 +339,13 @@ const FALSE_TYPE_POINTER: JTypeVtable = JTypeVtable {
     lt: false_::lt,
     lteq: false_::lteq,
 
-    get: notObject::get,
-    get_static: notObject::get_static,
-    set: notObject::set,
-    set_static: notObject::set_static,
-    remove_key_static: notObject::remove_key_static,
-    instanceOf: notObject::instanceOf,
-    In: notObject::In,
+    get: not_object::get,
+    get_static: not_object::get_static,
+    set: not_object::set,
+    set_static: not_object::set_static,
+    remove_key_static: not_object::remove_key_static,
+    instance_of: not_object::instance_of,
+    In: not_object::In,
 };
 
 const NUMBER_TYPE_POINTER: JTypeVtable = JTypeVtable {
@@ -390,13 +362,13 @@ const NUMBER_TYPE_POINTER: JTypeVtable = JTypeVtable {
     lt: number::lt,
     lteq: number::lteq,
 
-    get: notObject::get,
-    get_static: notObject::get_static,
-    set: notObject::set,
-    set_static: notObject::set_static,
-    remove_key_static: notObject::remove_key_static,
-    instanceOf: notObject::instanceOf,
-    In: notObject::In,
+    get: not_object::get,
+    get_static: not_object::get_static,
+    set: not_object::set,
+    set_static: not_object::set_static,
+    remove_key_static: not_object::remove_key_static,
+    instance_of: not_object::instance_of,
+    In: not_object::In,
 };
 
 const BIGINT_TYPE_POINTER: JTypeVtable = JTypeVtable {
@@ -413,13 +385,13 @@ const BIGINT_TYPE_POINTER: JTypeVtable = JTypeVtable {
     lt: bigint::lt,
     lteq: bigint::lteq,
 
-    get: notObject::get,
-    get_static: notObject::get_static,
-    set: notObject::set,
-    set_static: notObject::set_static,
-    remove_key_static: notObject::remove_key_static,
-    instanceOf: notObject::instanceOf,
-    In: notObject::In,
+    get: not_object::get,
+    get_static: not_object::get_static,
+    set: not_object::set,
+    set_static: not_object::set_static,
+    remove_key_static: not_object::remove_key_static,
+    instance_of: not_object::instance_of,
+    In: not_object::In,
 };
 
 const STRING_TYPE_POINTER: JTypeVtable = JTypeVtable {
@@ -442,8 +414,8 @@ const STRING_TYPE_POINTER: JTypeVtable = JTypeVtable {
     set_static: string::set_static,
     remove_key_static: string::remove_key_static,
 
-    instanceOf: notObject::instanceOf,
-    In: notObject::In,
+    instance_of: not_object::instance_of,
+    In: not_object::In,
 };
 
 const SYMBOL_TYPE_POINTER: JTypeVtable = JTypeVtable {
@@ -460,13 +432,13 @@ const SYMBOL_TYPE_POINTER: JTypeVtable = JTypeVtable {
     lt: symbol::throw,
     lteq: symbol::throw,
 
-    get: notObject::get,
-    get_static: notObject::get_static,
-    set: notObject::set,
-    set_static: notObject::set_static,
-    remove_key_static: notObject::remove_key_static,
-    instanceOf: notObject::instanceOf,
-    In: notObject::In,
+    get: not_object::get,
+    get_static: not_object::get_static,
+    set: not_object::set,
+    set_static: not_object::set_static,
+    remove_key_static: not_object::remove_key_static,
+    instance_of: not_object::instance_of,
+    In: not_object::In,
 };
 
 const OBJECT_TYPE_POINTER: JTypeVtable = JTypeVtable {
@@ -484,12 +456,12 @@ const OBJECT_TYPE_POINTER: JTypeVtable = JTypeVtable {
     set_static: object::set_static,
     remove_key_static: object::remove_key_static,
 
-    gt: object::False,
-    gteq: object::False,
-    lt: object::False,
-    lteq: object::False,
+    gt: object::gt,
+    gteq: object::gteq,
+    lt: object::lt,
+    lteq: object::lteq,
 
-    instanceOf: object::instanceOf,
+    instance_of: object::instance_of,
     In: object::In,
 };
 
@@ -531,7 +503,7 @@ impl JValue {
     }
 
     pub fn is_undefined(&self) -> bool {
-        return (self.type_pointer as *const _ == &UNDEFINED_TYPE_POINTER);
+        return self.type_pointer as *const _ == &UNDEFINED_TYPE_POINTER;
     }
 
     //pub fn is_real_undefined(&self) -> bool{
@@ -758,8 +730,8 @@ impl JValue {
         (self.type_pointer.In)(self.value, rhs)
     }
 
-    pub unsafe fn instanceof_(self, rhs: Self) -> (Self, bool) {
-        (self.type_pointer.instanceOf)(self.value, rhs)
+    pub unsafe fn instance_of_(self, rhs: Self) -> (Self, bool) {
+        (self.type_pointer.instance_of)(self.value, rhs)
     }
 
     pub unsafe fn remove_key_static_(self, id: u32) {
@@ -859,18 +831,14 @@ impl JValue {
         }
     }
 
-    pub unsafe fn new_raw(
-        self,
-        runtime: &Runtime,
-        stack: *mut JValue,
-        argc: u32,
-    ) -> (JValue, bool) {
-        todo!()
-    }
-
     pub fn get_property(self, field: JValue) -> Result<JValue, JValue> {
-        let key = field.to_string();
-        self.get_property_str(&key)
+        if field.is_string(){
+            let s = unsafe{field.value.string.as_str()};
+            self.get_property_str(s)
+        } else{
+            let s = field.to_string();
+            self.get_property_str(&s)
+        }
     }
 
     pub fn get_property_str(self, field: &str) -> Result<JValue, JValue> {
@@ -885,35 +853,42 @@ impl JValue {
     }
 
     pub(crate) fn get_property_static_(self, field_id: u32) -> (JValue, bool) {
-        todo!()
+        let mut stack = Vec::with_capacity(128);
+        unsafe{ (self.type_pointer.get_static)(self.value, field_id, stack.as_mut_ptr())}
     }
 
-    pub(crate) fn get_property_raw(self, field_id: u32, stack: *mut JValue) -> (JValue, bool) {
+    pub fn get_property_raw(self, field_id: u32, stack: *mut JValue) -> (JValue, bool) {
         unsafe { (self.type_pointer.get_static)(self.value, field_id, stack) }
     }
 
-    pub fn set_property(self, field: JValue) -> Result<JValue, JValue> {
-        let key = field.to_string();
-        self.set_property_str(&key)
-    }
-
-    pub fn set_property_str(self, key: &str) -> Result<JValue, JValue> {
-        let runtime = Runtime::current();
-        let id = runtime.register_field_name(key);
-
-        let (result, error) = self.set_property_static(id);
-        if error {
-            Err(result)
-        } else {
-            Ok(result)
+    pub fn set_property(self, field: JValue, value: JValue) -> Result<(), JValue>{
+        if field.is_string(){
+            let s = unsafe{field.value.string.as_str()};
+            self.set_property_str(s, value)
+        } else{
+            let s = field.to_string();
+            self.set_property_str(&s, value)
         }
     }
 
-    pub fn set_property_static(self, field_id: u32) -> (JValue, bool) {
-        todo!()
+    pub fn set_property_str(self, key: &str, value:JValue) -> Result<(), JValue>{
+        let runtime = Runtime::current();
+        let id = runtime.register_field_name(key);
+
+        self.set_property_static(id, value)
     }
 
-    pub(crate) fn set_property_raw(
+    pub fn set_property_static(self, field_id: u32, value: JValue) -> Result<(), JValue>{
+        let mut stack = Vec::with_capacity(128);
+        let (v, err) = unsafe{(self.type_pointer.set_static)(self.value, field_id, value, stack.as_mut_ptr())};
+        if err{
+            Err(v)
+        } else{
+            Ok(())
+        }
+    }
+
+    pub fn set_property_raw(
         self,
         field_id: u32,
         value: JValue,
@@ -926,6 +901,7 @@ impl JValue {
         if self.is_object() {
             self.value.object.trace();
         } else if self.is_string() {
+            self.value.string.trace();
         }
     }
 }
@@ -1190,7 +1166,6 @@ impl ToString for JValue {
 }
 
 mod number {
-    use crate::error::Error;
 
     use super::{JValue, JValueUnion};
 
@@ -1604,7 +1579,7 @@ mod null {
         return super::number::exp(JValueUnion { number: 0.0 }, rhs);
     }
 
-    pub(crate) unsafe fn eqeq(value: JValueUnion, rhs: JValue) -> (JValue, bool) {
+    pub(crate) unsafe fn eqeq(_value: JValueUnion, rhs: JValue) -> (JValue, bool) {
         let v = if rhs.is_null() {
             JValue::TRUE
         } else if rhs.is_undefined() {
@@ -1615,7 +1590,7 @@ mod null {
         (v, false)
     }
 
-    pub(crate) unsafe fn noteq(value: JValueUnion, rhs: JValue) -> (JValue, bool) {
+    pub(crate) unsafe fn noteq(_value: JValueUnion, rhs: JValue) -> (JValue, bool) {
         let v = if rhs.is_null() {
             JValue::FALSE
         } else if rhs.is_undefined() {
@@ -1749,15 +1724,15 @@ mod true_ {
         return super::number::sub(JValueUnion { number: 1.0 }, rhs);
     }
 
-    pub(crate) unsafe fn exp(value: JValueUnion, rhs: JValue) -> (JValue, bool) {
+    pub(crate) unsafe fn exp(_value: JValueUnion, rhs: JValue) -> (JValue, bool) {
         super::number::exp(JValueUnion { number: 1.0 }, rhs)
     }
 
-    pub(crate) unsafe fn eqeq(value: JValueUnion, rhs: JValue) -> (JValue, bool) {
+    pub(crate) unsafe fn eqeq(_value: JValueUnion, rhs: JValue) -> (JValue, bool) {
         super::number::eqeq(JValueUnion { number: 1.0 }, rhs)
     }
 
-    pub(crate) unsafe fn noteq(value: JValueUnion, rhs: JValue) -> (JValue, bool) {
+    pub(crate) unsafe fn noteq(_value: JValueUnion, rhs: JValue) -> (JValue, bool) {
         super::number::noteq(JValueUnion { number: 1.0 }, rhs)
     }
 
@@ -1810,15 +1785,15 @@ mod false_ {
         return super::number::sub(JValueUnion { number: 0.0 }, rhs);
     }
 
-    pub(crate) unsafe fn exp(value: JValueUnion, rhs: JValue) -> (JValue, bool) {
+    pub(crate) unsafe fn exp(_value: JValueUnion, rhs: JValue) -> (JValue, bool) {
         super::number::exp(JValueUnion { number: 0.0 }, rhs)
     }
 
-    pub(crate) unsafe fn eqeq(value: JValueUnion, rhs: JValue) -> (JValue, bool) {
+    pub(crate) unsafe fn eqeq(_value: JValueUnion, rhs: JValue) -> (JValue, bool) {
         super::number::eqeq(JValueUnion { number: 0.0 }, rhs)
     }
 
-    pub(crate) unsafe fn noteq(value: JValueUnion, rhs: JValue) -> (JValue, bool) {
+    pub(crate) unsafe fn noteq(_value: JValueUnion, rhs: JValue) -> (JValue, bool) {
         super::number::noteq(JValueUnion { number: 0.0 }, rhs)
     }
 
@@ -2025,29 +2000,31 @@ mod string {
     }
 
     pub(crate) unsafe fn set(
-        obj: JValueUnion,
-        field: JValue,
+        _obj: JValueUnion,
+        _field: JValue,
         value: JValue,
-        stack: *mut JValue,
+        _stack: *mut JValue,
     ) -> (JValue, bool) {
         (value, false)
     }
 
     pub(crate) unsafe fn set_static(
-        obj: JValueUnion,
-        field: u32,
+        _obj: JValueUnion,
+        _field: u32,
         value: JValue,
-        stack: *mut JValue,
+        _stack: *mut JValue,
     ) -> (JValue, bool) {
         (value, false)
     }
 
-    pub(crate) unsafe fn remove_key_static(obj: JValueUnion, field: u32) {}
+    pub(crate) unsafe fn remove_key_static(_obj: JValueUnion, _field: u32) {
+        // do nothing
+    }
 
     pub(crate) unsafe fn get(
         obj: JValueUnion,
         field: JValue,
-        stack: *mut JValue,
+        _stack: *mut JValue,
     ) -> (JValue, bool) {
         let v = if field.is_number() {
             let s = obj.string.as_ref().chars().nth(field.value.number as usize);
@@ -2081,7 +2058,7 @@ mod string {
     pub(crate) unsafe fn get_static(
         obj: JValueUnion,
         field: u32,
-        stack: *mut JValue,
+        _stack: *mut JValue,
     ) -> (JValue, bool) {
         let runtime = Runtime::current();
         let field = runtime.get_field_name(field);
@@ -2484,7 +2461,13 @@ mod object {
         field: JValue,
         stack: *mut JValue,
     ) -> (JValue, bool) {
-        obj.object.inner.get_property(&field.to_string(), stack)
+        if field.is_string(){
+            let s = field.value.string.as_str();
+            obj.object.inner.get_property(s, stack)
+        } else{
+            obj.object.inner.get_property(&field.to_string(), stack)
+        }
+        
     }
 
     pub(crate) unsafe fn get_static(
@@ -2501,10 +2484,15 @@ mod object {
         value: JValue,
         stack: *mut JValue,
     ) -> (JValue, bool) {
-        obj.object
+        if field.is_string(){
+            let s = field.value.string.as_str();
+            obj.object.inner.to_mut().set_property(s, value, stack)
+        } else{
+            obj.object
             .inner
             .to_mut()
             .set_property(&field.to_string(), value, stack)
+        }
     }
 
     pub(crate) unsafe fn set_static(
@@ -2520,7 +2508,7 @@ mod object {
         obj.object.inner.to_mut().remove_key_static(field);
     }
 
-    pub(crate) unsafe fn instanceOf(value: JValueUnion, rhs: JValue) -> (JValue, bool) {
+    pub(crate) unsafe fn instance_of(value: JValueUnion, rhs: JValue) -> (JValue, bool) {
         let v: bool = if rhs.is_object() {
             if rhs.value.object.inner.wrapped_value.is_function() {
                 let v = rhs
@@ -2552,10 +2540,10 @@ mod object {
     }
 }
 
-mod notObject {
+mod not_object {
     use super::*;
 
-    pub(crate) fn get(value: JValueUnion, rhs: JValue, stack: *mut JValue) -> (JValue, bool) {
+    pub(crate) fn get(_value: JValueUnion, _rhs: JValue, _stack: *mut JValue) -> (JValue, bool) {
         (
             JValue::Error(Error::TypeError(
                 "cannot read property of non object".into(),
@@ -2564,7 +2552,7 @@ mod notObject {
         )
     }
 
-    pub(crate) fn get_static(value: JValueUnion, rhs: u32, stack: *mut JValue) -> (JValue, bool) {
+    pub(crate) fn get_static(_value: JValueUnion, _rhs: u32, _stack: *mut JValue) -> (JValue, bool) {
         (
             JValue::Error(Error::TypeError(
                 "cannot read property of non object".into(),
@@ -2574,10 +2562,10 @@ mod notObject {
     }
 
     pub(crate) fn set(
-        obj: JValueUnion,
-        field: JValue,
-        value: JValue,
-        stack: *mut JValue,
+        _obj: JValueUnion,
+        _field: JValue,
+        _value: JValue,
+        _stack: *mut JValue,
     ) -> (JValue, bool) {
         (
             JValue::Error(Error::TypeError("cannot set property of non object".into())),
@@ -2586,10 +2574,10 @@ mod notObject {
     }
 
     pub(crate) fn set_static(
-        obj: JValueUnion,
-        field: u32,
-        value: JValue,
-        stack: *mut JValue,
+        _obj: JValueUnion,
+        _field: u32,
+        _value: JValue,
+        _stack: *mut JValue,
     ) -> (JValue, bool) {
         (
             JValue::Error(Error::TypeError("cannot set property of non object".into())),
@@ -2597,13 +2585,13 @@ mod notObject {
         )
     }
 
-    pub(crate) fn remove_key_static(obj: JValueUnion, field: u32) {}
+    pub(crate) fn remove_key_static(_obj: JValueUnion, _field: u32) {}
 
-    pub(crate) unsafe fn instanceOf(value: JValueUnion, rhs: JValue) -> (JValue, bool) {
+    pub(crate) unsafe fn instance_of(_value: JValueUnion, rhs: JValue) -> (JValue, bool) {
         if !rhs.is_object() {
             return (
                 JValue::Error(Error::TypeError(
-                    "Right-hand side of 'instanceof' is not callable".into(),
+                    "Right-hand side of 'instance_of' is not callable".into(),
                 )),
                 true,
             );
@@ -2611,7 +2599,7 @@ mod notObject {
         (JValue::FALSE, false)
     }
 
-    pub(crate) unsafe fn In(obj: JValueUnion, rhs: JValue) -> (JValue, bool) {
+    pub(crate) unsafe fn In(_obj: JValueUnion, _rhs: JValue) -> (JValue, bool) {
         (JValue::FALSE, false)
     }
 }

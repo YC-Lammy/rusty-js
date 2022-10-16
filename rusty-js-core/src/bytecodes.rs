@@ -191,11 +191,16 @@ pub enum OpCode {
     },
     PushArg {
         value: Register,
+        stack_offset:u16,
     },
     PushArgSpread {
         value: Register,
+        stack_offset:u16,
     },
-    FinishArgs,
+    FinishArgs{
+        base_stack_offset:u16,
+        len:u16,
+    },
 
     /// allocate memory and store in alloc register,
     /// this op is supposed to store values temporary
@@ -294,6 +299,12 @@ pub enum OpCode {
         result: Register,
         callee: Register,
         stack_offset: u16,
+    },
+    NewTarget{
+        result:Register
+    },
+    ImportMeta{
+        result:Register
     },
 
     IntoIter {
@@ -532,6 +543,31 @@ pub enum OpCode {
         obj: Register,
         field_id: u32,
         getter: Register,
+    },
+    /// extend an object by an object
+    ExtendObject{
+        obj:Register,
+        from:Register,
+    },
+    ReadSuperField{
+        constructor_result:CompactRegister,
+        field:Register,
+        stack_offset:u16,
+    },
+    ReadSuperFieldStatic{
+        constructor_result:CompactRegister,
+        field_id: u32,
+        stack_offset:u16,
+    },
+    WriteSuperField{
+        constructor_value:CompactRegister,
+        field:Register,
+        stack_offset:u16,
+    },
+    WriteSuperFieldStatic{
+        constructor_value:CompactRegister, // 8bit
+        field:u32, // 32 bit
+        stack_offset:u16, // 16bit
     },
 
     LoadStaticString {

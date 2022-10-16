@@ -4,6 +4,7 @@ use std::ops;
 pub struct PropFlag(u8);
 
 impl PropFlag {
+    pub const NONE:PropFlag = PropFlag(0);
     pub const ENUMERABLE: PropFlag = PropFlag(0b00000001);
     pub const WRITABLE: PropFlag = PropFlag(0b00000010);
     pub const CONFIGURABLE: PropFlag = PropFlag(0b00000100);

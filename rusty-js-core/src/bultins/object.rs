@@ -11,6 +11,8 @@ use crate::types::JValue;
 use crate::utils::nohasher::NoHasherBuilder;
 
 use super::class::JSClassInstance;
+use super::generator::Generator;
+use super::object_builder::ObjectBuilder;
 use super::typed_array::TypedArray;
 use super::function::JSFunctionInstance;
 use super::promise::Promise;
@@ -75,6 +77,19 @@ impl JObject {
         }
     }
 
+    pub fn new_target() -> Self{
+        let obj = Self::new();
+        obj.inner.to_mut().wrapped_value = JObjectValue::NewTarget;
+        return obj
+    }
+
+    pub fn is_new_target(&self) -> bool{
+        match self.inner.wrapped_value {
+            JObjectValue::NewTarget => true,
+            _ => false
+        }
+    }
+
     pub fn array() -> Self {
         Self::with_value(JObjectValue::Array(Vec::new()))
     }
@@ -99,10 +114,9 @@ impl JObject {
         Self::with_value(JObjectValue::WeakMap(Default::default()))
     }
 
+    /// todo: use f.create_object instead
     pub fn with_function(f: JSFunctionInstance) -> Self {
-        let obj = JObjectInner::new();
-        obj.wrapped_value = JObjectValue::Function(f);
-        Self { inner: obj }
+        f.create_object()
     }
 
     pub fn with_error(e: Error) -> Self {
@@ -123,7 +137,8 @@ impl JObject {
         Self::with_value(JObjectValue::Number(n))
     }
 
-    pub fn with_value(value: JObjectValue) -> Self {
+    /// with value is private
+    fn with_value(value: JObjectValue) -> Self {
         let obj = JObjectInner::new();
         obj.wrapped_value = value;
         Self { inner: obj }
@@ -195,6 +210,16 @@ impl JObject {
         self.as_number().is_some()
     }
 
+    pub fn as_class(&self) -> Option<&mut JSClassInstance>{
+        match &mut self.inner.to_mut().wrapped_value{
+            JObjectValue::Class(c) => Some(c),
+            _ => None
+        }
+    }
+    pub fn is_class(&self) -> bool{
+        self.as_class().is_some()
+    }
+
     pub fn is_primitive(&self) -> bool {
         self.inner.wrapped_value.is_primitive()
     }
@@ -228,8 +253,13 @@ impl JObject {
         }
     }
 
+    #[inline]
     pub fn insert_property(&mut self, key: &str, value: JValue, flag: PropFlag) {
         self.inner.to_mut().insert_property(key, value, flag)
+    }
+
+    pub fn insert_property_static(&mut self, key: u32, value: JValue, flag: PropFlag) {
+        self.inner.to_mut().insert_property_static(key, value, flag)
     }
 
     pub fn set_property_static(&mut self, key_id: u32, value: JValue, stack: *mut JValue) {
@@ -298,14 +328,7 @@ impl JObject {
         stack: *mut JValue,
         argc: u32,
     ) -> (JValue, bool) {
-        println!("call");
-
-        if let Some(f) = self.inner.wrapped_value.function() {
-            
-            f.call(runtime, this, stack, argc as usize)
-        } else {
-            (JValue::Error(Error::CallOnNonFunction), true)
-        }
+        self.inner.call(runtime, this, stack, argc as usize)
     }
 
     pub fn keys(&self) -> &'static [u32] {
@@ -322,6 +345,7 @@ impl JObject {
         JObject { inner: obj }
     }
 
+    #[inline]
     pub unsafe fn trace(self) {
         if self.inner.flag == GcFlag::Used {
             return;
@@ -474,13 +498,34 @@ impl JObjectInner {
         (JValue::UNDEFINED, false)
     }
 
+    #[inline]
     pub fn insert_property(&mut self, key: &str, value: JValue, flag: PropFlag) {
         //let r = hash_(key);
+
+        match key{
+            "__proto__" => {
+                if value.is_object() {
+                    self.__proto__ = Some(unsafe { value.value.object });
+                } else if value.is_null() {
+                    self.__proto__ = None;
+                }
+                return
+            },
+            
+            _ => {
+
+            }
+        };
+
         let runtime = Runtime::current();
         let r = runtime.register_field_name(key);
 
         self.values
             .insert(PropKey(r), (flag, PropCell { value: value }));
+    }
+
+    pub fn insert_property_static(&mut self, key:u32, value: JValue, flag: PropFlag) {
+        self.values.insert(PropKey(key), (flag, PropCell{value:value}));
     }
 
     pub fn set_property(
@@ -503,7 +548,7 @@ impl JObjectInner {
             _ => {
 
             }
-        }
+        };
 
         //let r = hash_(key);
         let runtime = Runtime::current();
@@ -562,12 +607,13 @@ impl JObjectInner {
 
         for (hashing, (flag, value)) in &self.values {
             if !flag.is_getter() && !flag.is_setter() {
-                let o = jobject_macro! {
-                    "enumerable":flag.is_enumerable().into(),
-                    "writable":flag.is_writable().into(),
-                    "configurable":flag.is_configurable().into(),
-                    "value":unsafe{value.value}
-                };
+                let o = ObjectBuilder::new()
+                .field("enumerable", flag.is_enumerable())
+                .field("writable", flag.is_writable())
+                .field("configurable", flag.is_configurable())
+                .field("value", unsafe{value.value})
+                .build();
+
                 h.insert(
                     *hashing,
                     (
@@ -582,18 +628,24 @@ impl JObjectInner {
         return h;
     }
 
+    /// this function handles function call and new call
+    #[inline]
     pub fn call(
-        &self,
+        &'static self,
         runtime: &Runtime,
         this: JValue,
         stack: *mut JValue,
         argc: usize,
     ) -> (JValue, bool) {
         if let Some(func) = self.wrapped_value.function() {
-            func.call(runtime, this, stack, argc)
-        } else {
-            (JValue::Error(Error::CallOnNonFunction), true)
+            return func.call(runtime, this, stack, argc)
+        } 
+        
+        if let Some(c) = self.wrapped_value.class(){
+            return c.call(runtime, JObject{inner:self}.into(), this, stack, argc);
         }
+
+        return (JValue::Error(Error::CallOnNonFunction), true)
     }
 
     pub(crate) fn to_mut(&self) -> &mut Self {
@@ -604,6 +656,7 @@ impl JObjectInner {
 #[derive(Clone)]
 pub enum JObjectValue {
     Empty,
+    NewTarget,
     Error(Error),
 
     String(JString),
@@ -615,7 +668,7 @@ pub enum JObjectValue {
     Array(Vec<(PropFlag, JValue)>),
     ArrayIterator(&'static JObject),
     Function(JSFunctionInstance),
-    Generator(()),
+    Generator(Generator),
     Class(JSClassInstance),
 
     Regex(Arc<RegExp>),
@@ -687,6 +740,13 @@ impl JObjectValue {
         }
     }
 
+    pub fn class(&self) -> Option<&JSClassInstance> {
+        match self{
+            Self::Class(c) => Some(c),
+            _ => None
+        }
+    }
+
     pub fn promise(&self) -> Option<&Promise> {
         match self {
             Self::Promise(p) => Some(p),
@@ -707,8 +767,13 @@ impl JObjectValue {
             Self::Function(f) => {
                 f.trace();
             },
-            Self::Generator(g) => {
+            Self::Generator(_g) => {
 
+            },
+            Self::Class(c) => {
+                if let Some(f) = &c.constructor_instance{
+                    f.trace();
+                }
             },
             Self::Map(m) => {
                 for (key, v) in m{

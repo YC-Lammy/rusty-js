@@ -6,13 +6,14 @@ use crate::bytecodes::OpCode;
 use crate::runtime::Runtime;
 use crate::types::JValue;
 
-use super::object::JObject;
+use super::object::{JObject, JObjectValue};
+use super::prop::PropFlag;
 
 #[derive(Clone)]
 pub struct JSFunctionInstance {
     capture_stack: CaptureStack,
     this: Option<JValue>,
-    func: Arc<JSFunction>,
+    pub(crate) func: Arc<JSFunction>,
 }
 
 impl JSFunctionInstance {
@@ -59,8 +60,26 @@ impl JSFunctionInstance {
             _ => {}
         };
     }
+
+    #[inline]
+    pub fn create_object(self) -> JObject{
+        let rt = Runtime::current();
+        let mut obj = JObject::new();
+        let mut proto = JObject::new();
+        
+        proto.insert_property("constructor", obj.into(), PropFlag::CONFIGURABLE|PropFlag::WRITABLE);
+
+        obj.insert_property("length", JValue::Number(self.func.args_len() as f64), PropFlag::CONFIGURABLE);
+        obj.insert_property("name", JValue::String("".into()), PropFlag::CONFIGURABLE);
+        obj.insert_property("prototype", proto.into(), PropFlag::NONE);
+        obj.insert_property("__proto__", rt.prototypes.function.into(), Default::default());
+
+        obj.inner.to_mut().wrapped_value = JObjectValue::Function(self);
+        return obj
+    }
 }
 
+// todo: use garbage collect CaptureStack
 pub enum CaptureStack {
     NeedAlloc(u32),
     Allocated(&'static CaptureStackInner),
@@ -155,6 +174,7 @@ pub enum JSFunction {
         is_async: bool,
         is_generator: bool,
         var_count: u16,
+        args_len:u16,
 
         call_count: u16,
         capture_stack_size: Option<u16>,
@@ -164,6 +184,7 @@ pub enum JSFunction {
         is_async: bool,
         is_generator: bool,
         var_count: u16,
+        args_len:u16,
 
         call_count: u16,
         capture_stack_size: Option<u16>,
@@ -171,7 +192,7 @@ pub enum JSFunction {
         bytecodes: Vec<OpCode>,
     },
 
-    Native(Arc<dyn Fn(JSFuncContext, JValue, &[JValue]) -> Result<JValue, JValue>>),
+    Native(Arc<dyn Fn(&JSFuncContext, JValue, &[JValue]) -> Result<JValue, JValue>>),
 }
 
 impl JSFunction {
@@ -191,6 +212,20 @@ impl JSFunction {
             Self::ByteCodes {
                 capture_stack_size, ..
             } => *capture_stack_size,
+        }
+    }
+
+    pub fn args_len(&self) -> usize{
+        match self {
+            Self::Baseline {args_len, ..} => {
+                *args_len as usize
+            },
+            Self::ByteCodes {args_len, ..} => {
+                *args_len as usize
+            },
+            Self::Native(_) => {
+                0
+            }
         }
     }
 
@@ -246,6 +281,7 @@ impl JSFunction {
                 is_async,
                 is_generator,
                 var_count,
+                args_len:_,
                 call_count,
                 capture_stack_size: _,
                 bytecodes,
@@ -318,6 +354,7 @@ impl JSFunction {
                 is_async,
                 is_generator,
                 var_count,
+                args_len:_,
                 call_count,
                 capture_stack_size: _,
                 func,
@@ -388,7 +425,7 @@ impl JSFunction {
                     stack: unsafe { stack.add(argc) },
                 };
 
-                let re = (n)(ctx, this, args);
+                let re = (n)(&ctx, this, args);
                 match re {
                     Ok(v) => (v, false),
                     Err(v) => (v, true),

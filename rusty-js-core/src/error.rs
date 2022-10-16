@@ -5,6 +5,8 @@ use crate::types::JValue;
 #[derive(Debug, Clone)]
 pub enum Error {
     CallOnNonFunction,
+    ClassCannotBeInvokedWithoutNew,
+    ClassExtendsNonCallable,
     LabelUndefined(String),
 
     IllegalBreak,

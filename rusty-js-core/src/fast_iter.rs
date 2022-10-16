@@ -1,7 +1,7 @@
 
 use crate::{
     bultins::{
-        object::{JObject, JObjectValue},
+        object::{JObject},
         prop::PropFlag,
     },
     bytecodes::LoopHint,
@@ -156,7 +156,7 @@ impl FastIterator {
             }
         }
 
-        let object = JObject::with_value(JObjectValue::Array(values));
+        let object = JObject::with_array(values);
         (JValue::Object(object), false)
     }
 

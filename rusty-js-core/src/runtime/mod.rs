@@ -42,6 +42,9 @@ pub struct StringID(pub(crate) u32);
 #[derive(Debug, Clone, Copy, Hash, PartialEq, Eq, PartialOrd, Ord)]
 pub struct TemplateID(pub(crate) u32);
 
+#[derive(Debug, Clone, Copy, Hash, PartialEq, Eq, PartialOrd, Ord)]
+pub struct FinalizationRegistryId(pub(crate) u32);
+
 thread_local! {
     pub static JS_RUNTIME: Option<Arc<Runtime>> = None;
 }
@@ -70,12 +73,23 @@ pub struct Runtime {
     regexs: Vec<Arc<bultins::regex::RegExp>>,
     templates: Vec<bultins::strings::Template>,
 
-    pub global: Option<JObject>,
+    pub global: JObject,
+    pub prototypes:bultins::BuiltinPrototypes,
+
+    pub(crate) new_target:JValue,
+    pub(crate) import_meta:JValue,
 
     pub(crate) async_executor: async_executor::AsyncExecutor<JValue>,
     pub(crate) generator_executor: async_executor::AsyncExecutor<JValue>,
 
+    pub(crate) finalize_registry:HashMap<FinalizationRegistryId, (JObject, Vec<(JObject, JValue)>)>,
+    /// a reference counted user owned value
     user_owned: HashMap<JValue, AtomicUsize>,
+
+    /// must be private to avoid cloning
+    /// 
+    /// sends signal to the garbage collecting thread
+    garbage_collect_signal:crossbeam_channel::Sender<()>,
 }
 
 unsafe impl Sync for Runtime {}
@@ -95,6 +109,9 @@ impl Runtime {
                 as *mut [JValue; DEFAULT_STACK_SIZE];
             Box::from_raw(ptr)
         };
+
+        let (gc_sender, gc_recv) = crossbeam_channel::unbounded();
+
         let runtime = Arc::new(Self {
             obj_field_names: StringInterner::new(),
             dynamic_var_names: StringInterner::new(),
@@ -113,26 +130,73 @@ impl Runtime {
             functions: vec![],
             classes: vec![],
             templates: vec![],
-            global: None,
+            global: unsafe{
+                // will be allocated imediately
+                #[allow(invalid_value)]
+                std::mem::transmute(0usize)
+            },
+            prototypes:bultins::BuiltinPrototypes::zero(),
+
+            new_target:JValue::UNDEFINED,
+            import_meta:JValue::UNDEFINED,
+
             async_executor: async_executor::AsyncExecutor::new(),
             generator_executor: async_executor::AsyncExecutor::new(),
 
+            finalize_registry:Default::default(),
             user_owned: Default::default(),
+
+            garbage_collect_signal:gc_sender
         });
 
-        runtime.to_mut().global = Some(JObject {
+        // allocate global object
+        runtime.to_mut().global = JObject {
             inner: runtime.allocate_obj(),
+        };
+        
+        runtime.to_mut().import_meta = JObject{
+            inner: runtime.allocate_obj()
+        }.into();
+
+        // allocate builtin prototypes
+        runtime.to_mut().prototypes.init(runtime.to_mut());
+
+        // get the raw pointer to avoid runtime being moved
+        let r = runtime.as_ref() as *const Runtime as usize;
+
+        // todo: avoid unsafe operation
+        std::thread::spawn(move||{
+            loop{
+                if let Ok(_) = gc_recv.recv(){
+                    // if the channel is alive, the runtime is alive
+                    let rt = unsafe{(r as *mut Runtime).as_mut().unwrap()};
+                    unsafe{rt.string_allocator.garbage_collect()};
+                    rt.object_allocator.garbage_collect();
+                    rt.clean_functions();
+                } else{
+                    break
+                };
+            }
         });
 
         runtime
     }
 
+    #[inline]
+    pub fn is_attached() -> bool{
+        JS_RUNTIME.with(|runtime|{
+            runtime.is_some()
+        })
+    }
+    
+    #[inline]
     pub fn attach(self: Arc<Self>) {
         JS_RUNTIME.with(|runtime| unsafe {
             *(runtime as *const Option<Arc<Runtime>> as *mut Option<Arc<Runtime>>) = Some(self);
         })
     }
 
+    #[inline]
     pub fn deattach() {
         JS_RUNTIME.with(|runtime| unsafe {
             *(runtime as *const Option<Arc<Runtime>> as *mut Option<Arc<Runtime>>) = None;
@@ -153,6 +217,7 @@ impl Runtime {
         })
     }
 
+    #[inline]
     pub fn execute(
         self: Arc<Self>,
         filename: &str,
@@ -197,8 +262,9 @@ impl Runtime {
 
         let mut intpr =
             crate::interpreter::Interpreter::global(&self, self.to_mut().stack.as_mut_slice());
-        let re = intpr.run(JValue::Object(self.global.unwrap()), &[], &bytecodes);
+        let re = intpr.run(JValue::Object(self.global), &[], &bytecodes);
 
+        // finish all the async tasks
         self.to_mut().finish_async();
 
         match re {
@@ -207,11 +273,13 @@ impl Runtime {
         }
     }
 
+    /// a lazy workaround to mutate runtime
     #[inline]
     pub(crate) fn to_mut(&self) -> &mut Self {
         unsafe { (self as *const Self as *mut Self).as_mut().unwrap() }
     }
 
+    /// allocate object from the allocater
     #[inline]
     pub(crate) fn allocate_obj(&self) -> &'static mut JObjectInner {
         unsafe { self.to_mut().object_allocator.allocate() }
@@ -322,7 +390,7 @@ impl Runtime {
     #[inline]
     pub fn create_native_function<F>(&self, func: F) -> JObject
     where
-        F: Fn(JSFuncContext, JValue, &[JValue]) -> Result<JValue, JValue> + 'static,
+        F: Fn(&JSFuncContext, JValue, &[JValue]) -> Result<JValue, JValue> + 'static,
     {
         let f: Arc<JSFunction> = Arc::new(JSFunction::Native(Arc::new(func)));
         let obj = JObject::with_function(f.create_instance(None));
@@ -333,20 +401,24 @@ impl Runtime {
     //          Class
     ////////////////////////////////////////////////////////////////////
 
-    pub(crate) fn new_class(&self) -> ClassID {
-        self.to_mut().classes.push(Some(Arc::new(JSClass::new())));
+    #[inline]
+    pub(crate) fn new_class(&self, name:String) -> ClassID {
+        self.to_mut().classes.push(Some(Arc::new(JSClass::new(name))));
         return ClassID((self.classes.len() - 1) as u32);
     }
 
+    #[inline]
     pub(crate) fn get_class(&self, id:ClassID) -> Arc<JSClass>{
         self.classes.get(id.0 as usize).unwrap().clone().unwrap()
     }
 
+    #[inline]
     pub(crate) fn bind_class_constructor(&self, class_id: ClassID, func_id: FuncID) {
         let c = self.classes[class_id.0 as usize].clone().unwrap();
         c.to_mut().constructor = Some(self.get_function(func_id).unwrap());
     }
 
+    #[inline]
     pub(crate) fn bind_class_method(&self, class_id: ClassID, func_name: &str, func_id: FuncID) {
         let name = self.to_mut().register_field_name(func_name);
         let c = self.classes[class_id.0 as usize].clone().unwrap();
@@ -355,6 +427,7 @@ impl Runtime {
             .insert(name, self.get_function(func_id).unwrap());
     }
 
+    #[inline]
     pub(crate) fn bind_class_getter(&self, class_id: ClassID, func_name: &str, func_id: FuncID) {
         let name = self.to_mut().register_field_name(func_name);
         let c = self.classes[class_id.0 as usize].clone().unwrap();
@@ -367,6 +440,7 @@ impl Runtime {
         }
     }
 
+    #[inline]
     pub(crate) fn bind_class_setter(&self, class_id: ClassID, func_name: &str, func_id: FuncID) {
         let name = self.to_mut().register_field_name(func_name);
         let c = self.classes[class_id.0 as usize].clone().unwrap();
@@ -379,6 +453,7 @@ impl Runtime {
         }
     }
 
+    #[inline]
     pub(crate) fn bind_class_static_method(
         &self,
         class_id: ClassID,
@@ -392,6 +467,7 @@ impl Runtime {
             .insert(name, self.get_function(func_id).unwrap());
     }
 
+    #[inline]
     pub(crate) fn bind_class_static_getter(
         &self,
         class_id: ClassID,
@@ -409,6 +485,7 @@ impl Runtime {
         }
     }
 
+    #[inline]
     pub(crate) fn bind_class_static_setter(
         &self,
         class_id: ClassID,
@@ -426,6 +503,7 @@ impl Runtime {
         }
     }
 
+    #[inline]
     pub(crate) fn bind_class_prop(&self, class_id: ClassID, name: &str) -> u32 {
         let name = self.to_mut().register_field_name(name);
         let c = self.classes[class_id.0 as usize].clone().unwrap();
@@ -435,6 +513,7 @@ impl Runtime {
         name
     }
 
+    #[inline]
     pub(crate) fn bind_class_static_prop(&self, class_id: ClassID, name: &str) -> u32 {
         let name = self.to_mut().register_field_name(name);
         let c = self.classes[class_id.0 as usize].clone().unwrap();
@@ -511,11 +590,7 @@ impl Runtime {
 
     #[inline]
     pub fn global(&self) -> &JObject {
-        if let Some(obj) = &self.global {
-            obj
-        } else {
-            panic!()
-        }
+        &self.global
     }
 
     #[inline]
@@ -528,7 +603,6 @@ impl Runtime {
                 .resolve(DefaultSymbol::try_from_usize(key as usize).unwrap())
                 .unwrap();
             self.global
-                .unwrap()
                 .inner
                 .get_property(key, std::ptr::null_mut())
         }
@@ -544,7 +618,6 @@ impl Runtime {
                 .resolve(DefaultSymbol::try_from_usize(key as usize).unwrap())
                 .unwrap();
             self.global
-                .unwrap()
                 .inner
                 .to_mut()
                 .set_property(key, value, std::ptr::null_mut());
@@ -557,17 +630,45 @@ impl Runtime {
 
     #[inline]
     pub unsafe fn run_gc(&mut self) {
-        self.object_allocator.marking();
 
         // scan root and stack
-        self.global.unwrap().trace();
+        self.finalize_registry.iter().for_each(|(_key, (func, objects))|{
+            func.trace();
+            for (obj, held_value) in objects{
+                if obj.inner.flag == GcFlag::Garbage{
+                    continue;
+                }
+                obj.inner.to_mut().flag = GcFlag::Finalize;
+                held_value.trace();
+            };
+        });
+        self.constants.iter().for_each(|v|v.trace());
+        self.global.trace();
+        self.prototypes.trace();
+        self.new_target.trace();
+
         self.user_owned.keys().into_iter().for_each(|v| v.trace());
         self.variables.values().into_iter().for_each(|v| v.trace());
         self.stack.iter().for_each(|v|v.trace());
         self.async_stack.iter().for_each(|v|v.trace());
+        
+        let rt = self as *mut Runtime;
 
-        self.object_allocator.garbage_collect();
-        self.clean_functions();
+        for (_key, (func, objects)) in &mut self.finalize_registry{
+            let mut stack = Vec::with_capacity(128);
+            for (obj, held_value) in objects.iter_mut(){
+
+                if obj.inner.flag == GcFlag::Finalize{
+                    stack.resize(1, *held_value);
+                    (*func).call(rt.as_ref().unwrap(), self.global.into(), stack.as_mut_ptr(), 1);
+
+                    obj.inner.to_mut().flag = GcFlag::NotUsed;
+                    // todo: clean up registry
+                }
+            };
+        }
+
+        self.garbage_collect_signal.send(()).unwrap();  
     }
 
     /// return the reference counter

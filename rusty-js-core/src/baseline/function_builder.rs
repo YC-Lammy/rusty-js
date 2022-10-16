@@ -155,7 +155,7 @@ pub struct JSFunctionBuilder {
 }
 
 impl JSFunctionBuilder {
-    fn new() -> Self {
+    pub fn new() -> Self {
         let func_ctx = get_ctx();
         let func = get_func();
 
@@ -342,8 +342,7 @@ impl JSFunctionBuilder {
 
         // fn(this:JValue, ctx:&Runtime, stack:*mut JValue, argc:u32, capture_stack:*mut JValue)
         this.builder.func.signature.params.extend(&[
-            AbiParam::new(POINTER_TYPE),
-            AbiParam::new(POINTER_TYPE),
+            AbiParam::new(POINTER_TYPE), AbiParam::new(POINTER_TYPE),
             AbiParam::new(POINTER_TYPE),
             AbiParam::new(POINTER_TYPE),
             AbiParam::new(types::I32),
@@ -459,7 +458,9 @@ impl JSFunctionBuilder {
     fn get_stack_pointer(&mut self, offset: u16) -> ir::Value {
         let stack = self.builder.use_var(self.stack_pointer);
 
-        if self.args_len.len() >= 1 {
+        // the offset is now calculated during bytecode building
+        
+        /*if self.args_len.len() >= 1 {
             // there is another function call going on
             let len = *self.args_len.last().unwrap();
             let len = self.builder.use_var(len);
@@ -474,7 +475,7 @@ impl JSFunctionBuilder {
             } else {
                 stack
             }
-        } else {
+        } else {*/
             if offset != 0 {
                 self.builder
                     .ins()
@@ -482,7 +483,7 @@ impl JSFunctionBuilder {
             } else {
                 stack
             }
-        }
+        //}
     }
 
     fn translate_byte_code(&mut self, code: &OpCode) {
@@ -724,7 +725,7 @@ impl JSFunctionBuilder {
 
                 let re = self.call_vtable(
                     l.1,
-                    JTypeVtable::offset_instanceOf(),
+                    JTypeVtable::offset_instance_of(),
                     self.basic_op_sigref,
                     &[l.0, r.0, r.1],
                 );
@@ -928,10 +929,13 @@ impl JSFunctionBuilder {
                 let ptr = self.builder.use_var(self.stack_pointer);
                 let offset = (*stack_offset as usize) * JValue::SIZE;
 
+                // let value = *(stack + offset);
                 let value =
                     self.builder
                         .ins()
                         .load(POINTER_TYPE, MemFlags::new(), ptr, offset as i32);
+
+                // let vtable = *(stack + offset + size_of JValueUnion)
                 let vtable = self.builder.ins().load(
                     POINTER_TYPE,
                     MemFlags::new(),
@@ -939,30 +943,38 @@ impl JSFunctionBuilder {
                     (offset + JValue::VALUE_SIZE) as i32,
                 );
 
+                // let capture_stack = self.capture_stack;
                 let capture_stack = self.builder.use_var(self.capture_stack_pointer);
                 let capture_offset = (*capture_stack_offset as usize) * JValue::SIZE;
 
+                // *(capture_stack + capture_offset) = value;
                 self.builder.ins().store(
                     MemFlags::new(),
                     value,
                     capture_stack,
                     capture_offset as i32,
                 );
+                // *(capture_stack + capture_offset + size_of JValueUnion) = vtable;
                 self.builder.ins().store(
                     MemFlags::new(),
                     vtable,
                     capture_stack,
                     (capture_offset + JValue::VALUE_SIZE) as i32,
                 );
-            }
+            },
             OpCode::ReadDynamicVar { result, id } => {
+                // let callee = operation::dynamic_get;
                 let callee = self
                     .builder
                     .ins()
                     .iconst(POINTER_TYPE, self.dynamic_get as *const u8 as usize as i64);
+
+                // let runtime = self.runtime;
                 let runtime = self.builder.use_var(self.runtime);
+                // let key = id as i32;
                 let key = self.builder.ins().iconst(types::I32, *id as i64);
 
+                // let (v, err) = operation::dynamic_get(runtime, key);
                 let inst = self.builder.ins().call_indirect(
                     self.dynamic_get_sigref,
                     callee,
@@ -970,6 +982,8 @@ impl JSFunctionBuilder {
                 );
                 let vs = self.builder.inst_results(inst).to_owned();
                 self.store_error(vs[2]);
+
+                // self.result = v;
                 self.store_idx(result.0, vs[0], vs[1]);
             }
             OpCode::WriteDynamicVar { from, id } => {
@@ -1122,8 +1136,8 @@ impl JSFunctionBuilder {
 
                 self.args_len.push(args_len);
                 self.args_pointer.push(args_ptr);
-            }
-            OpCode::PushArg { value } => {
+            },
+            OpCode::PushArg { value, stack_offset } => {
                 let length = *self.args_len.last().unwrap();
 
                 let len = self.builder.use_var(length);
@@ -1143,10 +1157,12 @@ impl JSFunctionBuilder {
                     .ins()
                     .store(MemFlags::new(), value.1, addr, JValue::VALUE_SIZE as i32);
             }
-            OpCode::PushArgSpread { value } => {
+            OpCode::PushArgSpread { value, stack_offset } => {
                 let v = self.use_idx(value.0);
             }
-            OpCode::FinishArgs => {}
+            OpCode::FinishArgs{ base_stack_offset, len } => {
+
+            }
             OpCode::Call {
                 result,
                 this,
