@@ -42,3 +42,12 @@ let result = a.vtable.add(a.value, b);
 | AArch64 | ✅                                 | ✅                        | ❌       |
 | ARM     | ✅                                 | ❌                        | ❌       |
 | RISC-V  | ✅                                 | ❌                        | ❌       |
+
+## Ecma Roadmap
+|                               | status |       remark             |
+| ----------------------------- | ------ | ------------------------ |
+| Object.prototype.constructor  | ✅    |                           | 
+| Object.prototype.assign | ✅    |                           |
+| AArch64           | ✅    |                           | 
+| ARM               | ✅    ||
+| RISC-V            | ✅    ||
