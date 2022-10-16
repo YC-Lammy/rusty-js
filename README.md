@@ -44,10 +44,4 @@ let result = a.vtable.add(a.value, b);
 | RISC-V  | ✅                                 | ❌                        | ❌       |
 
 ## Ecma Roadmap
-|                               | status |       remark             |
-| ----------------------------- | ------ | ------------------------ |
-| Object.prototype.constructor  | ✅    |                           | 
-| Object.prototype.assign | ✅    |                           |
-| AArch64           | ✅    |                           | 
-| ARM               | ✅    ||
-| RISC-V            | ✅    ||
+for more information, see [here](https://github.com/YC-Lammy/rusty-js/projects).
