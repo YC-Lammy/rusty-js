@@ -1,5 +1,5 @@
 # rusty-js
- a JIT Javascript Engine written in rust.
+ a JIT Javascript Engine written in rust. It is an experiental enigine inspired by golang's insterface type.
 
 ## Overview
 
@@ -19,7 +19,7 @@ struct JSValue{
 let a:JSValue = 0.into();
 let b:JSValue = 1.into();
 
-let result = a.vtable.add(a.value, b);
+let result = a.vtable.add(a.value, b); // returns 1
 ```
 
 ## JIT stages
