@@ -24,12 +24,10 @@ impl JSFunctionInstance {
         stack: *mut JValue,
         argc: usize,
     ) -> (JValue, bool) {
-
         let this = if let Some(t) = self.this { t } else { this };
 
         let mut need_drop: Option<CaptureStack> = None;
 
-        
         let capture_stack = match self.capture_stack {
             CaptureStack::Allocated(a) => a.to_mut().as_data(),
             CaptureStack::NeedAlloc(n) => {
@@ -46,36 +44,44 @@ impl JSFunctionInstance {
         return re;
     }
 
-    pub unsafe fn trace(&self){
-        if let Some(v) = &self.this{
+    pub unsafe fn trace(&self) {
+        if let Some(v) = &self.this {
             v.trace();
         }
 
-        match &self.capture_stack{
+        match &self.capture_stack {
             CaptureStack::Allocated(a) => {
-                for i in a.as_data(){
+                for i in a.as_data() {
                     i.trace();
                 }
-            },
+            }
             _ => {}
         };
     }
 
     #[inline]
-    pub fn create_object(self) -> JObject{
+    pub fn create_object(self) -> JObject {
         let rt = Runtime::current();
-        let mut obj = JObject::new();
-        let mut proto = JObject::new();
-        
-        proto.insert_property("constructor", obj.into(), PropFlag::CONFIGURABLE|PropFlag::WRITABLE);
+        let obj = JObject::new();
+        let proto = JObject::new();
 
-        obj.insert_property("length", JValue::Number(self.func.args_len() as f64), PropFlag::CONFIGURABLE);
+        proto.insert_property("constructor", obj.into(), PropFlag::BUILTIN);
+
+        obj.insert_property(
+            "length",
+            JValue::Number(self.func.args_len() as f64),
+            PropFlag::CONFIGURABLE,
+        );
         obj.insert_property("name", JValue::String("".into()), PropFlag::CONFIGURABLE);
         obj.insert_property("prototype", proto.into(), PropFlag::NONE);
-        obj.insert_property("__proto__", rt.prototypes.function.into(), Default::default());
+        obj.insert_property(
+            "__proto__",
+            rt.prototypes.function.into(),
+            Default::default(),
+        );
 
         obj.inner.to_mut().wrapped_value = JObjectValue::Function(self);
-        return obj
+        return obj;
     }
 }
 
@@ -103,7 +109,7 @@ impl CaptureStackInner {
         let ptr = unsafe { (ptr as *mut CaptureStackInner).as_mut().unwrap() };
         *ptr = CaptureStackInner { rc: 0, alloc: size };
 
-        for i in ptr.as_data(){
+        for i in ptr.as_data() {
             *i = JValue::UNDEFINED;
         }
         return ptr;
@@ -174,7 +180,7 @@ pub enum JSFunction {
         is_async: bool,
         is_generator: bool,
         var_count: u16,
-        args_len:u16,
+        args_len: u16,
 
         call_count: u16,
         capture_stack_size: Option<u16>,
@@ -184,7 +190,7 @@ pub enum JSFunction {
         is_async: bool,
         is_generator: bool,
         var_count: u16,
-        args_len:u16,
+        args_len: u16,
 
         call_count: u16,
         capture_stack_size: Option<u16>,
@@ -215,17 +221,11 @@ impl JSFunction {
         }
     }
 
-    pub fn args_len(&self) -> usize{
+    pub fn args_len(&self) -> usize {
         match self {
-            Self::Baseline {args_len, ..} => {
-                *args_len as usize
-            },
-            Self::ByteCodes {args_len, ..} => {
-                *args_len as usize
-            },
-            Self::Native(_) => {
-                0
-            }
+            Self::Baseline { args_len, .. } => *args_len as usize,
+            Self::ByteCodes { args_len, .. } => *args_len as usize,
+            Self::Native(_) => 0,
         }
     }
 
@@ -281,7 +281,7 @@ impl JSFunction {
                 is_async,
                 is_generator,
                 var_count,
-                args_len:_,
+                args_len: _,
                 call_count,
                 capture_stack_size: _,
                 bytecodes,
@@ -315,15 +315,14 @@ impl JSFunction {
                     cap.increment_count();
 
                     let p = runtime.to_mut().call_async(move || {
-
                         let oldstack = stack;
                         let runtime = Runtime::current();
                         let stack = runtime.to_mut().get_async_stack(var_count as usize);
 
-                        unsafe{std::ptr::copy(oldstack, stack.as_mut_ptr(), argc)};
+                        unsafe { std::ptr::copy(oldstack, stack.as_mut_ptr(), argc) };
 
                         let stack_ptr = stack.as_mut_ptr();
-                        let args = unsafe{std::slice::from_raw_parts(stack_ptr, argc)};
+                        let args = unsafe { std::slice::from_raw_parts(stack_ptr, argc) };
 
                         let mut intpr = crate::interpreter::Interpreter::function(
                             &runtime,
@@ -344,7 +343,6 @@ impl JSFunction {
                     });
 
                     (JObject::with_promise(p).into(), false)
-
                 } else {
                     todo!("generator function")
                 }
@@ -354,7 +352,7 @@ impl JSFunction {
                 is_async,
                 is_generator,
                 var_count,
-                args_len:_,
+                args_len: _,
                 call_count,
                 capture_stack_size: _,
                 func,
@@ -363,20 +361,12 @@ impl JSFunction {
                 if stack.is_null() {
                     panic!()
                 }
-                
+
                 *call_count += 1;
 
-                if !*is_async && !*is_generator{
-                    
-                    func.call(
-                        runtime,
-                        this,
-                        argc as u32,
-                        stack,
-                        capture_stack.as_mut_ptr(),
-                    )
-                } else if *is_async && !*is_generator{
-
+                if !*is_async && !*is_generator {
+                    func.call(runtime, this, argc, stack, capture_stack.as_mut_ptr())
+                } else if *is_async && !*is_generator {
                     // make sure the CaptureStack live long enough
                     let cap = CaptureStackInner::from_data_ptr(capture_stack.as_mut_ptr());
                     cap.increment_count();
@@ -384,36 +374,39 @@ impl JSFunction {
                     let f = func.clone();
                     let var_count = *var_count as usize;
 
-                    let p = runtime.to_mut().call_async(move ||{
-
+                    let p = runtime.to_mut().call_async(move || {
                         let oldstack = stack;
                         let runtime = Runtime::current();
                         let stack = runtime.to_mut().get_async_stack(var_count);
 
-                        unsafe{std::ptr::copy(oldstack, stack.as_mut_ptr(), argc)};
+                        unsafe { std::ptr::copy(oldstack, stack.as_mut_ptr(), argc) };
 
                         runtime.user_own_value(this);
 
-                        let re = f.call(&runtime, this, argc as u32, stack.as_mut_ptr(), cap.as_data().as_mut_ptr());
+                        let re = f.call(
+                            &runtime,
+                            this,
+                            argc,
+                            stack.as_mut_ptr(),
+                            cap.as_data().as_mut_ptr(),
+                        );
 
                         runtime.user_drop_value(this);
 
                         // drop the capture stack
                         cap.to_mut().decrement_count();
 
-                        if re.1{
-                            return Err(re.0)
-                        } else{
-                            return Ok(re.0)
+                        if re.1 {
+                            return Err(re.0);
+                        } else {
+                            return Ok(re.0);
                         }
                     });
 
-                    return (JObject::with_promise(p).into(), false)
-
-                } else{
+                    return (JObject::with_promise(p).into(), false);
+                } else {
                     todo!("generator function")
                 }
-                
             }
 
             Self::Native(n) => {

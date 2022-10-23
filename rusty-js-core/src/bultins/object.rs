@@ -11,20 +11,20 @@ use crate::types::JValue;
 use crate::utils::nohasher::NoHasherBuilder;
 
 use super::class::JSClassInstance;
+use super::function::JSFunctionInstance;
 use super::generator::Generator;
 use super::object_builder::ObjectBuilder;
-use super::typed_array::TypedArray;
-use super::function::JSFunctionInstance;
 use super::promise::Promise;
 use super::proxy::Proxy;
 use super::regex::RegExp;
 use super::strings::JString;
 use super::symbol::JSymbol;
+use super::typed_array::TypedArray;
 
 use super::prop::PropFlag;
 
 #[derive(Hash, Clone, Copy, PartialEq, Eq)]
-pub struct PropKey(u32);
+pub struct PropKey(pub(crate) u32);
 
 #[derive(Clone, Copy)]
 pub union PropCell {
@@ -77,40 +77,45 @@ impl JObject {
         }
     }
 
-    pub fn new_target() -> Self{
+    pub fn new_target() -> Self {
         let obj = Self::new();
         obj.inner.to_mut().wrapped_value = JObjectValue::NewTarget;
-        return obj
+        return obj;
     }
 
-    pub fn is_new_target(&self) -> bool{
+    pub fn is_new_target(&self) -> bool {
         match self.inner.wrapped_value {
             JObjectValue::NewTarget => true,
-            _ => false
+            _ => false,
         }
     }
 
     pub fn array() -> Self {
-        Self::with_value(JObjectValue::Array(Vec::new()))
+        let rt = Runtime::current();
+        let inner = rt.allocate_obj();
+        inner.__proto__ = Some(rt.prototypes.array);
+        inner.wrapped_value = JObjectValue::Array(Vec::new());
+
+        return JObject { inner: inner }
     }
 
-    pub fn with_array(a:Vec<(PropFlag, JValue)>) -> Self{
+    pub fn with_array(a: Vec<(PropFlag, JValue)>) -> Self {
         Self::with_value(JObjectValue::Array(a))
     }
 
-    pub fn new_map() -> Self{
+    pub fn new_map() -> Self {
         Self::with_value(JObjectValue::Map(Default::default()))
     }
 
-    pub fn new_set() -> Self{
+    pub fn new_set() -> Self {
         Self::with_value(JObjectValue::Set(Default::default()))
     }
 
-    pub fn weak_set() -> Self{
+    pub fn weak_set() -> Self {
         Self::with_value(JObjectValue::WeakSet(Default::default()))
     }
 
-    pub fn weak_map() -> Self{
+    pub fn weak_map() -> Self {
         Self::with_value(JObjectValue::WeakMap(Default::default()))
     }
 
@@ -129,11 +134,11 @@ impl JObject {
         Self::with_value(JObjectValue::Promise(p))
     }
 
-    pub fn with_regex(r:Arc<RegExp>) -> Self{
+    pub fn with_regex(r: Arc<RegExp>) -> Self {
         Self::with_value(JObjectValue::Regex(r))
     }
 
-    pub fn with_number(n:f64) -> Self{
+    pub fn with_number(n: f64) -> Self {
         Self::with_value(JObjectValue::Number(n))
     }
 
@@ -142,6 +147,10 @@ impl JObject {
         let obj = JObjectInner::new();
         obj.wrapped_value = value;
         Self { inner: obj }
+    }
+
+    pub fn set_inner(&self, value: JObjectValue) {
+        self.inner.to_mut().wrapped_value = value;
     }
 
     pub fn as_array(&self) -> Option<&mut Vec<(PropFlag, JValue)>> {
@@ -195,28 +204,28 @@ impl JObject {
         }
     }
 
-    pub fn is_error(&self) -> bool{
+    pub fn is_error(&self) -> bool {
         self.as_error().is_some()
     }
 
-    pub fn as_number(&self) -> Option<f64>{
+    pub fn as_number(&self) -> Option<f64> {
         match &self.inner.wrapped_value {
             JObjectValue::Number(n) => Some(*n),
-            _ => None
+            _ => None,
         }
     }
 
-    pub fn is_number(&self) -> bool{
+    pub fn is_number(&self) -> bool {
         self.as_number().is_some()
     }
 
-    pub fn as_class(&self) -> Option<&mut JSClassInstance>{
-        match &mut self.inner.to_mut().wrapped_value{
+    pub fn as_class(&self) -> Option<&mut JSClassInstance> {
+        match &mut self.inner.to_mut().wrapped_value {
             JObjectValue::Class(c) => Some(c),
-            _ => None
+            _ => None,
         }
     }
-    pub fn is_class(&self) -> bool{
+    pub fn is_class(&self) -> bool {
         self.as_class().is_some()
     }
 
@@ -254,15 +263,19 @@ impl JObject {
     }
 
     #[inline]
-    pub fn insert_property(&mut self, key: &str, value: JValue, flag: PropFlag) {
+    pub fn insert_property(&self, key: &str, value: JValue, flag: PropFlag) {
         self.inner.to_mut().insert_property(key, value, flag)
     }
 
-    pub fn insert_property_static(&mut self, key: u32, value: JValue, flag: PropFlag) {
+    pub fn insert_property_static(&self, key: u32, value: JValue, flag: PropFlag) {
         self.inner.to_mut().insert_property_static(key, value, flag)
     }
 
-    pub fn set_property_static(&mut self, key_id: u32, value: JValue, stack: *mut JValue) {
+    pub(crate) fn insert_property_builtin(&self, key: &str, value: JValue) {
+        self.insert_property(key, value, PropFlag::BUILTIN)
+    }
+
+    pub fn set_property_static(&self, key_id: u32, value: JValue, stack: *mut JValue) {
         unsafe {
             self.inner
                 .to_mut()
@@ -347,6 +360,9 @@ impl JObject {
 
     #[inline]
     pub unsafe fn trace(self) {
+        if self.inner.flag == GcFlag::Garbage{
+            return;
+        }
         if self.inner.flag == GcFlag::Used {
             return;
         }
@@ -365,12 +381,11 @@ impl JObject {
             }
         }
 
-        if let Some(p) = &self.inner.__proto__{
+        if let Some(p) = &self.inner.__proto__ {
             p.trace();
         }
 
         self.inner.wrapped_value.trace();
-
     }
 }
 
@@ -391,6 +406,8 @@ impl From<&'static mut JObjectInner> for JObject {
 pub struct JObjectInner {
     pub(crate) flag: GcFlag,
 
+    pub(crate) extensible: bool,
+
     pub(crate) values: PropMap,
 
     pub(crate) __proto__: Option<JObject>,
@@ -402,6 +419,7 @@ impl Default for JObjectInner {
     fn default() -> Self {
         JObjectInner {
             flag: GcFlag::Used,
+            extensible: true,
             values: Default::default(),
             __proto__: None,
             wrapped_value: JObjectValue::Empty,
@@ -410,6 +428,7 @@ impl Default for JObjectInner {
 }
 
 impl JObjectInner {
+    #[inline]
     pub fn new() -> &'static mut JObjectInner {
         let runtime = Runtime::current();
         runtime.allocate_obj()
@@ -427,6 +446,7 @@ impl JObjectInner {
         self.values.contains_key(&PropKey(key))
     }
 
+    #[inline]
     pub fn get(&'static self, key: &str, stack: *mut JValue) -> Option<JValue> {
         let (v, err) = self.get_property(key, stack);
         if err {
@@ -440,10 +460,12 @@ impl JObjectInner {
         }
     }
 
+    #[inline]
     pub fn get_static(&'static self, key: u32, stack: *mut JValue) -> (JValue, bool) {
         unsafe { self.get_property_static(key, stack) }
     }
 
+    #[inline]
     pub fn set_static(
         &'static self,
         key: u32,
@@ -453,6 +475,7 @@ impl JObjectInner {
         unsafe { self.to_mut().set_property_static(key, value, stack) }
     }
 
+    #[inline]
     pub fn get_property(&'static self, key: &str, stack: *mut JValue) -> (JValue, bool) {
         if key == "__proto__" {
             if let Some(obj) = self.__proto__ {
@@ -468,12 +491,18 @@ impl JObjectInner {
         unsafe { self.get_property_static(r, stack) }
     }
 
+    #[inline]
     pub unsafe fn get_property_static(
         &'static self,
         key: u32,
         stack: *mut JValue,
     ) -> (JValue, bool) {
         if let Some((f, v)) = self.values.get(&PropKey(key)) {
+            if !f.is_getter() && !f.is_setter() {
+                // a data property
+                return (v.value, false);
+            }
+
             if f.is_getter() && f.is_setter() {
                 let this = JValue::Object(JObject { inner: self });
                 let runtime = Runtime::current();
@@ -493,7 +522,6 @@ impl JObjectInner {
             } else if f.is_setter() {
                 return (JValue::UNDEFINED, false);
             }
-            return (v.value, false);
         }
         (JValue::UNDEFINED, false)
     }
@@ -502,19 +530,17 @@ impl JObjectInner {
     pub fn insert_property(&mut self, key: &str, value: JValue, flag: PropFlag) {
         //let r = hash_(key);
 
-        match key{
+        match key {
             "__proto__" => {
                 if value.is_object() {
                     self.__proto__ = Some(unsafe { value.value.object });
                 } else if value.is_null() {
                     self.__proto__ = None;
                 }
-                return
-            },
-            
-            _ => {
-
+                return;
             }
+
+            _ => {}
         };
 
         let runtime = Runtime::current();
@@ -524,18 +550,20 @@ impl JObjectInner {
             .insert(PropKey(r), (flag, PropCell { value: value }));
     }
 
-    pub fn insert_property_static(&mut self, key:u32, value: JValue, flag: PropFlag) {
-        self.values.insert(PropKey(key), (flag, PropCell{value:value}));
+    #[inline]
+    pub fn insert_property_static(&mut self, key: u32, value: JValue, flag: PropFlag) {
+        self.values
+            .insert(PropKey(key), (flag, PropCell { value: value }));
     }
 
+    #[inline]
     pub fn set_property(
         &'static mut self,
         key: &str,
         value: JValue,
         stack: *mut JValue,
     ) -> (JValue, bool) {
-
-        match key{
+        match key {
             "__proto__" => {
                 if value.is_object() {
                     self.__proto__ = Some(unsafe { value.value.object });
@@ -543,11 +571,9 @@ impl JObjectInner {
                     self.__proto__ = None;
                 }
                 return (JValue::UNDEFINED, false);
-            },
-            
-            _ => {
-
             }
+
+            _ => {}
         };
 
         //let r = hash_(key);
@@ -557,6 +583,7 @@ impl JObjectInner {
         unsafe { self.set_property_static(r, value, stack) }
     }
 
+    #[inline]
     pub unsafe fn set_property_static(
         &'static mut self,
         key: u32,
@@ -588,9 +615,23 @@ impl JObjectInner {
                 }
             } else if f.is_getter() {
             } else {
-                *v = PropCell { value: value };
-            }
+                if f.is_writable() {
+                    *v = PropCell { value: value };
+                }
+            };
         } else {
+            if !self.extensible {
+                let rt = Runtime::current();
+                let n = rt.get_field_name(key);
+                return (
+                    JValue::Error(Error::TypeError(format!(
+                        "Cannot add property {}, object is not extensible",
+                        n
+                    ))),
+                    true,
+                );
+            }
+
             self.values
                 .insert(PropKey(key), (PropFlag::THREE, PropCell { value: value }));
         }
@@ -608,11 +649,11 @@ impl JObjectInner {
         for (hashing, (flag, value)) in &self.values {
             if !flag.is_getter() && !flag.is_setter() {
                 let o = ObjectBuilder::new()
-                .field("enumerable", flag.is_enumerable())
-                .field("writable", flag.is_writable())
-                .field("configurable", flag.is_configurable())
-                .field("value", unsafe{value.value})
-                .build();
+                    .field("enumerable", flag.is_enumerable())
+                    .field("writable", flag.is_writable())
+                    .field("configurable", flag.is_configurable())
+                    .field("value", unsafe { value.value })
+                    .build();
 
                 h.insert(
                     *hashing,
@@ -638,14 +679,14 @@ impl JObjectInner {
         argc: usize,
     ) -> (JValue, bool) {
         if let Some(func) = self.wrapped_value.function() {
-            return func.call(runtime, this, stack, argc)
-        } 
-        
-        if let Some(c) = self.wrapped_value.class(){
-            return c.call(runtime, JObject{inner:self}.into(), this, stack, argc);
+            return func.call(runtime, this, stack, argc);
         }
 
-        return (JValue::Error(Error::CallOnNonFunction), true)
+        if let Some(c) = self.wrapped_value.class() {
+            return c.call(runtime, JObject { inner: self }.into(), this, stack, argc);
+        }
+
+        return (JValue::Error(Error::CallOnNonFunction), true);
     }
 
     pub(crate) fn to_mut(&self) -> &mut Self {
@@ -675,16 +716,16 @@ pub enum JObjectValue {
     Promise(Promise),
     Proxy(Proxy),
 
-    Map(HashMap<JValue, JValue>),
-    Set(HashMap<JValue, ()>),
-    WeakMap(HashMap<u64, JValue>),
-    WeakSet(HashMap<u64, ()>),
+    Map(Box<HashMap<JValue, JValue>>),
+    Set(Box<HashMap<JValue, ()>>),
+    WeakMap(Box<HashMap<u64, JValue>>),
+    WeakSet(Box<HashMap<u64, ()>>),
 
     /// ArrayBuffers are shared
     ArrayBuffer(Arc<Vec<u8>>),
     DataView(()),
 
-    TypedArray(TypedArray<()>)
+    TypedArray(TypedArray<()>),
 }
 
 impl JObjectValue {
@@ -741,9 +782,9 @@ impl JObjectValue {
     }
 
     pub fn class(&self) -> Option<&JSClassInstance> {
-        match self{
+        match self {
             Self::Class(c) => Some(c),
-            _ => None
+            _ => None,
         }
     }
 
@@ -754,48 +795,71 @@ impl JObjectValue {
         }
     }
 
-    pub unsafe fn trace(&self){
-        match self{
+    #[inline]
+    pub unsafe fn trace(&self) {
+        match self {
             Self::Array(a) => {
-                for (_f, v) in a{
+                for (_f, v) in a {
                     v.trace();
                 }
-            },
+            }
             Self::ArrayIterator(a) => {
                 a.trace();
-            },
+            }
             Self::Function(f) => {
                 f.trace();
-            },
-            Self::Generator(_g) => {
-
-            },
+            }
+            Self::Generator(_g) => {}
             Self::Class(c) => {
-                if let Some(f) = &c.constructor_instance{
+                if let Some(f) = &c.constructor_instance {
                     f.trace();
                 }
-            },
+
+                if let Some(v) = &c.super_ {
+                    v.trace();
+                }
+            }
             Self::Map(m) => {
-                for (key, v) in m{
+                for (key, v) in m.iter() {
                     key.trace();
                     v.trace();
                 }
-            },
+            }
             Self::Proxy(p) => {
                 p.handler.trace();
                 p.target.trace();
-            },
+            }
+            Self::Promise(p) => {
+                match p {
+                    Promise::Fulfilled(f) => {
+                        f.trace();
+                    }
+                    Promise::Rejected(r) => {
+                        r.trace();
+                    }
+                    Promise::Pending { id: _ } => {}
+                };
+            }
             Self::Set(s) => {
-                for (key, _) in s{
+                for (key, _) in s.iter() {
                     key.trace();
                 }
-            },
+            }
+            Self::String(s) => {
+                s.trace();
+            }
             Self::WeakMap(m) => {
-                for (_, v) in m{
+                for (_, v) in m.iter() {
                     v.trace();
                 }
-            },
+            }
             _ => {}
         }
+    }
+}
+
+impl Default for JObjectValue {
+    fn default() -> Self {
+        JObjectValue::Empty
     }
 }

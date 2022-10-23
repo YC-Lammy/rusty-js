@@ -15,10 +15,10 @@ pub struct Function {
         this: JValue,
         ctx: &Runtime,
         stack: *mut JValue,
-        argc: u32,
+        argc: usize,
         capture_stack: *mut JValue,
     ) -> (JValue, bool),
-    code_size: usize,
+    m:memmap2::Mmap
 }
 
 impl Function {
@@ -26,19 +26,10 @@ impl Function {
         &self,
         runtime: &Runtime,
         this: JValue,
-        argc: u32,
+        argc: usize,
         stack: *mut JValue,
         capture_stack: *mut JValue,
     ) -> (JValue, bool) {
         (self.func)(this, runtime, stack, argc, capture_stack)
-    }
-}
-
-impl Drop for Function {
-    fn drop(&mut self) {
-        unsafe {
-            let ptr = std::mem::transmute::<_, *mut u8>(self.func);
-            std::alloc::dealloc(ptr, Layout::array::<u8>(self.code_size).unwrap());
-        }
     }
 }

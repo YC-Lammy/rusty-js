@@ -1,9 +1,5 @@
-
 use crate::{
-    bultins::{
-        object::{JObject},
-        prop::PropFlag,
-    },
+    bultins::{object::JObject, prop::PropFlag},
     bytecodes::LoopHint,
     error::Error,
     runtime::Runtime,
@@ -26,13 +22,9 @@ pub enum FastIterator {
     Empty,
 }
 
-#[test]
-fn test_fast_iter_size() {
-    assert!(std::mem::size_of::<FastIterator>() == 16)
-}
-
 #[allow(unused)]
 impl FastIterator {
+    #[inline]
     pub unsafe fn new(iter: JValue, hint: LoopHint) -> &'static mut FastIterator {
         Box::leak(Box::new(if hint == LoopHint::ForIn {
             if iter.is_object() {
@@ -69,6 +61,7 @@ impl FastIterator {
         }))
     }
     /// return (done, error, value)
+    #[inline]
     pub fn next(&mut self, this: JValue, stack: *mut JValue) -> (bool, bool, JValue) {
         match self {
             Self::Empty => (true, false, JValue::UNDEFINED),
@@ -76,10 +69,6 @@ impl FastIterator {
                 if array.len() > *count as usize + 1 {
                     *count += 1;
                     (false, false, array.get(*count as usize).unwrap().1)
-                } else if array.len() == *count as usize {
-                    let v = (true, false, array.get(*count as usize).unwrap().1);
-                    *self = Self::Empty;
-                    return v;
                 } else {
                     (true, false, JValue::UNDEFINED)
                 }

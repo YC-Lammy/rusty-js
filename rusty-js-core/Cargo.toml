@@ -5,6 +5,11 @@ edition = "2021"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
+[profile.dev]
+opt-level = 3
+incremental = true  
+codegen-units = 16
+
 [dependencies]
 swc_ecmascript = {version="0.203", features=["parser", "dep_graph", ]}
 swc_common = "0.29.0"
@@ -24,9 +29,11 @@ lock_api = "*"
 num-traits = "*"
 memmap2 = "*"
 unicode-id-start = "*"
+likely_stable = "*"
 array_tool = "*"
 corosensei = {version = "0.1", optional = true}
 regress = {version = "*", optional = true}
 
 [features]
 default = ["corosensei", "regress"]
+logging = []

@@ -1,14 +1,16 @@
 use swc_common::FileName;
 use swc_common::SourceFile;
 
+use crate::error::Error;
 use crate::runtime::Runtime;
 use crate::types::JValue;
-use crate::error::Error;
 
 mod bridge;
 
+
 macro_rules! debug {
     ($($arg:tt)*) => {
+        #[cfg(feature = "logging")]
         $crate::debug::logging(&format!($($arg)*))
     };
 }
@@ -18,7 +20,7 @@ pub(crate) use debug;
 #[cfg(test)]
 #[inline]
 pub fn logging(s: &str) {
-    println!("{}", s);
+    //println!("{}", s);
 }
 
 #[cfg(not(test))]
@@ -45,7 +47,7 @@ pub fn parse_script(script: &str) -> swc_ecmascript::ast::Script {
             import_assertions: true,
             private_in_object: true,
             allow_super_outside_method: false,
-            allow_return_outside_function:false,
+            allow_return_outside_function: false,
         }),
         swc_ecmascript::ast::EsVersion::Es2022,
         None,
@@ -64,17 +66,23 @@ pub fn test_native_function() {
     let a = std::sync::Arc::new(std::cell::Cell::new(0));
 
     let a1 = a.clone();
-    let func = runtime.create_native_function(move|ctx, this, args| {
-
+    let func = runtime.create_native_function(move |ctx, this, args| {
         a1.set(a1.get() + 1);
-        println!("{:#?}", args.get(0).map(|v|v.get_property_str("o")));
+        // expected 9 and 0
+        println!(
+            "{:#?},{:#?},{:#?},{:#?}",
+            args.get(0).map(|v| v.get_property_str("o")),
+            args.get(0).map(|v| v.get_property_str("p")),
+            args.get(1),
+            args.get(2)
+        );
         println!("hello world!");
         Ok(JValue::UNDEFINED)
     });
 
-    let id = runtime.regester_dynamic_var_name("hello");
-    runtime.to_mut().set_variable(id, func.into());
+    runtime.to_mut().declare_variable("hello", func.into());
 
+    let t = std::time::Instant::now();
     runtime
         .execute(
             "hello_world",
@@ -92,19 +100,53 @@ pub fn test_native_function() {
     for (i=0;i<9;i++){
         hello();
     }
-    a = {p:0, o:9};
-    hello(a)
+    a = {p:0.09.toPrecision(8), o:"io"};
+    hello(a, 0, 9, ...[])
     "#,
-        ).map_err(|e|{
-            match e{
+        )
+        .map_err(|e| {
+            match e {
                 Error::Value(v) => {
-                    println!("{}", e.to_string());
-                },
+                    println!("{}", v.to_string());
+                }
                 e => {
                     println!("{}", e.to_string());
                 }
             };
-        });
-
+        })
+        .unwrap();
+    println!("{}", t.elapsed().as_secs_f64()*1000.0);
     println!("{}", a.get());
+}
+
+#[test]
+fn test2() {
+    let runtime = Runtime::new();
+
+    runtime.clone().attach();
+
+    
+
+    let o = runtime.create_native_function(|ctx, this, args|{
+        println!("{}", args[0].as_number_uncheck());
+        Ok(JValue::UNDEFINED)
+    });
+    runtime.declare_variable("log", o.into());
+
+    let t = std::time::Instant::now();
+    runtime
+        .execute(
+            "",
+            r#"
+    let i = 0;
+    let a = 9;
+    for (i=0;i<100000;i++){
+        a += 1;
+    };
+    log(a);
+    "#,
+        )
+        .unwrap();
+
+    println!("{} ms", t.elapsed().as_secs_f64()*1000.0);
 }

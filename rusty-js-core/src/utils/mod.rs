@@ -1,6 +1,7 @@
 pub mod nohasher;
 pub mod string_interner;
 pub mod utf16;
+pub mod pointer_vec;
 
 /// offset_of!(type, field); return memory offset of field in usize
 #[macro_export]

@@ -1,8 +1,8 @@
-use std::sync::Arc;
 use std::marker::PhantomData;
+use std::sync::Arc;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub enum ArrayType{
+pub enum ArrayType {
     Int8,
     Uint8,
     Uint8Clamped,
@@ -17,13 +17,16 @@ pub enum ArrayType{
 }
 
 #[derive(Clone)]
-pub struct TypedArray<T> where T:'static{
-    pub array_buffer:Arc<Vec<u8>>,
-    pub ty:PhantomData<T>
+pub struct TypedArray<T>
+where
+    T: 'static,
+{
+    pub array_buffer: Arc<Vec<u8>>,
+    pub ty: PhantomData<T>,
 }
 
-impl<T:'static> TypedArray<T>{
-    pub fn len(&self) -> usize{
-        return self.array_buffer.len() / std::mem::size_of::<T>()
+impl<T: 'static> TypedArray<T> {
+    pub fn len(&self) -> usize {
+        return self.array_buffer.len() / std::mem::size_of::<T>();
     }
 }

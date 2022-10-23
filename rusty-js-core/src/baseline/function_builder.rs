@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use cranelift::codegen::ir::{self, types, SigRef, Signature, StackSlot};
@@ -89,7 +90,7 @@ pub struct JSFunctionBuilder {
     builder: FunctionBuilder<'static>,
     builder_context: &'static mut FunctionBuilderContext,
 
-    block_offset: i32,
+    blocks:HashMap<crate::bytecodes::Block, ir::Block>,
 
     this: JSVariable,
     /// pointer to runtime
@@ -109,6 +110,7 @@ pub struct JSFunctionBuilder {
     /// pointer to stack
     stack_pointer: Variable,
     capture_stack_pointer: Variable,
+    num_args: Variable,
 
     registers: [JSVariable; 3],
 
@@ -155,7 +157,7 @@ pub struct JSFunctionBuilder {
 }
 
 impl JSFunctionBuilder {
-    pub fn new() -> Self {
+    pub fn new(args_len: usize) -> Self {
         let func_ctx = get_ctx();
         let func = get_func();
 
@@ -163,7 +165,7 @@ impl JSFunctionBuilder {
             builder: FunctionBuilder::new(func, unsafe { std::mem::transmute_copy(&func_ctx) }),
             builder_context: func_ctx,
 
-            block_offset: 0,
+            blocks:Default::default(),
             catch_blocks: Vec::new(),
             return_block: ir::Block::from_u32(0),
 
@@ -176,13 +178,14 @@ impl JSFunctionBuilder {
 
             stack_pointer: Variable::with_u32(4),
             capture_stack_pointer: Variable::with_u32(5),
+            num_args: Variable::with_u32(6),
 
             registers: [
-                JSVariable(Variable::with_u32(6), Variable::with_u32(7)),
-                JSVariable(Variable::with_u32(8), Variable::with_u32(9)),
-                JSVariable(Variable::with_u32(10), Variable::with_u32(11)),
+                JSVariable(Variable::with_u32(7), Variable::with_u32(8)),
+                JSVariable(Variable::with_u32(9), Variable::with_u32(10)),
+                JSVariable(Variable::with_u32(11), Variable::with_u32(12)),
             ],
-            error: Variable::with_u32(12),
+            error: Variable::with_u32(13),
 
             for_in_iter: Vec::new(),
             iter: Vec::new(),
@@ -199,7 +202,7 @@ impl JSFunctionBuilder {
             iter_collect_sig: SigRef::from_u32(0),
             iter_collect: FastIterator::collect,
 
-            iter_ended: Variable::with_u32(13),
+            iter_ended: Variable::with_u32(14),
 
             temp_allocs: Vec::new(),
             temp_values: Vec::new(),
@@ -229,9 +232,10 @@ impl JSFunctionBuilder {
         this.define_var(9, POINTER_TYPE);
         this.define_var(10, POINTER_TYPE);
         this.define_var(11, POINTER_TYPE);
+        this.define_var(12, POINTER_TYPE);
 
-        this.define_var(12, types::B8);
         this.define_var(13, types::B8);
+        this.define_var(14, types::B8);
 
         // fn(JValueUnion, JValue) -> (JValue, bool)
         this.basic_op_sigref = this.builder.import_signature(Signature {
@@ -340,14 +344,16 @@ impl JSFunctionBuilder {
             call_conv: ISA.default_call_conv(),
         });
 
-        // fn(this:JValue, ctx:&Runtime, stack:*mut JValue, argc:u32, capture_stack:*mut JValue)
+        // fn(this:JValue, ctx:&Runtime, stack:*mut JValue, argc:usize, capture_stack:*mut JValue)
         this.builder.func.signature.params.extend(&[
-            AbiParam::new(POINTER_TYPE), AbiParam::new(POINTER_TYPE),
             AbiParam::new(POINTER_TYPE),
             AbiParam::new(POINTER_TYPE),
-            AbiParam::new(types::I32),
+            AbiParam::new(POINTER_TYPE),
+            AbiParam::new(POINTER_TYPE),
+            AbiParam::new(POINTER_TYPE),
             AbiParam::new(POINTER_TYPE),
         ]);
+        // -> (JValue, error)
         this.builder.func.signature.returns.extend(&[
             AbiParam::new(POINTER_TYPE),
             AbiParam::new(POINTER_TYPE), //JValue
@@ -363,10 +369,12 @@ impl JSFunctionBuilder {
         this.store(this.this, params[0], params[1]);
         this.builder.def_var(this.runtime, params[2]);
 
-        //let offset = this.builder.ins().uextend(POINTER_TYPE, params[4]);
-        let stack_ptr = this.builder.ins().iadd(params[3], params[4]);
+        // argc * size_of JValue
+        let o = this.builder.ins().imul_imm(params[4], JValue::SIZE as i64);
+        let stack_ptr = this.builder.ins().iadd(params[3], o);
 
         this.builder.def_var(this.stack_pointer, stack_ptr);
+        this.builder.def_var(this.num_args, params[4]);
         this.builder.def_var(this.capture_stack_pointer, params[5]);
 
         this.return_block = this.builder.create_block();
@@ -434,7 +442,24 @@ impl JSFunctionBuilder {
         for code in codes {
             self.translate_byte_code(code);
         }
-        todo!()
+        self.builder.seal_all_blocks();
+        let re = ISA.compile_function(self.builder.func, false).unwrap();
+        let mut mem = memmap2::MmapMut::map_anon(re.code_buffer().len()).unwrap();
+        mem.copy_from_slice(re.code_buffer());
+        
+        self.builder.finalize();
+        self.builder.func.clear();
+
+        return_ctx_func(unsafe{std::mem::transmute_copy(&self.builder_context)}, unsafe{std::mem::transmute_copy(&self.builder.func)});
+
+        let mut mem = mem.make_exec().unwrap();
+        let f = unsafe{std::mem::transmute(mem.as_ptr())};
+
+        Arc::new(super::Function{
+            profiler:Default::default(),
+            func:f,
+            m:mem
+        })
     }
 
     fn read_stack(&mut self, offset: u16) -> (ir::Value, ir::Value) {
@@ -459,7 +484,7 @@ impl JSFunctionBuilder {
         let stack = self.builder.use_var(self.stack_pointer);
 
         // the offset is now calculated during bytecode building
-        
+
         /*if self.args_len.len() >= 1 {
             // there is another function call going on
             let len = *self.args_len.last().unwrap();
@@ -476,13 +501,13 @@ impl JSFunctionBuilder {
                 stack
             }
         } else {*/
-            if offset != 0 {
-                self.builder
-                    .ins()
-                    .iadd_imm(stack, (offset as usize * JValue::SIZE) as i64)
-            } else {
-                stack
-            }
+        if offset != 0 {
+            self.builder
+                .ins()
+                .iadd_imm(stack, (offset as usize * JValue::SIZE) as i64)
+        } else {
+            stack
+        }
         //}
     }
 
@@ -893,18 +918,25 @@ impl JSFunctionBuilder {
                 let a = self.use_idx(a.0);
                 let b = self.use_idx(b.0);
 
+                // compare value with undefined
                 let c = self.builder.ins().icmp_imm(
                     ir::condcodes::IntCC::Equal,
                     a.1,
                     JValue::UNDEFINED.type_pointer as *const _ as usize as i64,
                 );
-                let v = self.builder.ins().select(c, a.0, b.0);
-                let t = self.builder.ins().select(c, a.1, b.1);
+
+                // selects b if a is undefined
+                let v = self.builder.ins().select(c, b.0, a.0);
+                let t = self.builder.ins().select(c, b.1, a.1);
                 self.store_idx(result.0, v, t);
             }
             OpCode::Return { value } => {
+                // load the value
                 let v = self.use_idx(value.0);
+                // is not an error
                 let error = self.builder.ins().bconst(types::B8, false);
+
+                // return (value, vtable, error)
                 self.builder.ins().return_(&[v.0, v.1, error]);
             }
             OpCode::Throw { value } => {
@@ -945,6 +977,7 @@ impl JSFunctionBuilder {
 
                 // let capture_stack = self.capture_stack;
                 let capture_stack = self.builder.use_var(self.capture_stack_pointer);
+                // capture_offset = offset * size_of JValue
                 let capture_offset = (*capture_stack_offset as usize) * JValue::SIZE;
 
                 // *(capture_stack + capture_offset) = value;
@@ -961,7 +994,7 @@ impl JSFunctionBuilder {
                     capture_stack,
                     (capture_offset + JValue::VALUE_SIZE) as i32,
                 );
-            },
+            }
             OpCode::ReadDynamicVar { result, id } => {
                 // let callee = operation::dynamic_get;
                 let callee = self
@@ -989,13 +1022,17 @@ impl JSFunctionBuilder {
             OpCode::WriteDynamicVar { from, id } => {
                 let v = self.use_idx(from.0);
 
+                // let callee = operation::dynamic_set
                 let callee = self
                     .builder
                     .ins()
                     .iconst(POINTER_TYPE, self.dynamic_set as *const u8 as usize as i64);
+
+                // let runtime = self.runtime;
                 let runtime = self.builder.use_var(self.runtime);
                 let key = self.builder.ins().iconst(types::I32, *id as i64);
 
+                // callee(runtime, key, value, vtable)
                 self.builder.ins().call_indirect(
                     self.dynamic_set_sigref,
                     callee,
@@ -1018,7 +1055,7 @@ impl JSFunctionBuilder {
                 self.temp_values.push(va);
                 self.builder.def_var(va.0, v.0);
                 self.builder.def_var(va.1, v.1);
-            }
+            },
             OpCode::ReadTemp { value } => {
                 let va = self.temp_values.last().expect("read empty temp value");
                 let v = self.builder.use_var(va.0);
@@ -1119,49 +1156,85 @@ impl JSFunctionBuilder {
                 stack_offset,
                 len: _,
             } => {
-                let stack = self.builder.use_var(self.stack_pointer);
 
-                let args = self.get_stack_pointer(*stack_offset);
-                let len = self.builder.ins().iconst(types::I32, 0);
-
-                let args_ptr = Variable::with_u32(self.next_var);
-                self.next_var += 1;
-                let args_len = Variable::with_u32(self.next_var);
-                self.next_var += 1;
-
-                self.builder.declare_var(args_ptr, POINTER_TYPE);
-                self.builder.declare_var(args_len, types::I32);
-                self.builder.def_var(args_ptr, args);
-                self.builder.def_var(args_len, len);
-
-                self.args_len.push(args_len);
-                self.args_pointer.push(args_ptr);
-            },
-            OpCode::PushArg { value, stack_offset } => {
-                let length = *self.args_len.last().unwrap();
-
-                let len = self.builder.use_var(length);
-                let len = self.builder.ins().iadd_imm(len, 1);
-                self.builder.def_var(length, len);
-
-                let len = self.builder.ins().uextend(POINTER_TYPE, len);
-                let offset = self.builder.ins().imul_imm(len, JValue::SIZE as i64);
-
-                let args_ptr = self.builder.use_var(*self.args_pointer.last().unwrap());
-                let addr = self.builder.ins().iadd(args_ptr, offset);
-
-                let value = self.use_idx(value.0);
-
-                self.builder.ins().store(MemFlags::new(), value.0, addr, 0);
-                self.builder
-                    .ins()
-                    .store(MemFlags::new(), value.1, addr, JValue::VALUE_SIZE as i32);
             }
-            OpCode::PushArgSpread { value, stack_offset } => {
+            OpCode::PushArg {
+                value,
+                stack_offset,
+            } => {
                 let v = self.use_idx(value.0);
-            }
-            OpCode::FinishArgs{ base_stack_offset, len } => {
+                let ptr = self.builder.use_var(self.stack_pointer);
+                self.builder.ins().store(MemFlags::new(), v.0, ptr, *stack_offset as i32 * JValue::SIZE as i32);
+                self.builder.ins().store(MemFlags::new(), v.1, ptr, *stack_offset as i32 * JValue::SIZE as i32 + JValue::VALUE_SIZE as i32);
+            },
+            OpCode::PushArgSpread {
+                value,
+                stack_offset,
+            } => {
+                let (value, vtable) = self.use_idx(value.0);
+                let ptr = self.builder.use_var(self.stack_pointer);
 
+                // change to spreadable if vtable is object
+                let c = self.builder.ins().icmp_imm(ir::condcodes::IntCC::Equal, vtable, &JTypeVtable::OBJECT as *const _ as i64);
+                let v = self.builder.ins().iconst(POINTER_TYPE, &JTypeVtable::SPREAD_OBJECT as *const _ as i64);
+                let vtable = self.builder.ins().select(c, v, vtable);
+
+                // change to spreadable if vtable is string
+                let c = self.builder.ins().icmp_imm(ir::condcodes::IntCC::Equal, vtable, &JTypeVtable::STRING as *const _ as i64);
+                let v = self.builder.ins().iconst(POINTER_TYPE, &JTypeVtable::SPREAD_STRING as *const _ as i64);
+                let vtable = self.builder.ins().select(c, v, vtable);
+
+                self.builder.ins().store(MemFlags::new(), value, ptr, *stack_offset as i32 * JValue::SIZE as i32);
+                self.builder.ins().store(MemFlags::new(), vtable, ptr, *stack_offset as i32 * JValue::SIZE as i32 + JValue::VALUE_SIZE as i32);
+            }
+            OpCode::FinishArgs {
+                base_stack_offset,
+                len,
+            } => {
+                // todo: spread arguments
+                let len = self.builder.ins().iconst(POINTER_TYPE, *len as i64);
+                self.builder.def_var(self.num_args, len);
+            }
+            OpCode::ReadParam { result, index } => {
+                let ptr = self.builder.use_var(self.stack_pointer);
+                let len = self.builder.use_var(self.num_args);
+                // offset = len * size_of JValue
+                let offset = self.builder.ins().imul_imm(len, JValue::SIZE as i64);
+                // offset = offset - index * size_of JValue
+                let offset = self
+                    .builder
+                    .ins()
+                    .iadd_imm(offset, -(*index as i64 * JValue::SIZE as i64));
+                // ptr = ptr - offset
+                let ptr = self.builder.ins().isub(ptr, offset);
+
+                // index >= len
+                let larger = self.builder.ins().icmp_imm(
+                    ir::condcodes::IntCC::UnsignedLessThanOrEqual,
+                    len,
+                    *index as i64,
+                );
+
+                let undefined_ptr = self
+                    .builder
+                    .ins()
+                    .iconst(POINTER_TYPE, &JValue::UNDEFINED as *const JValue as i64);
+
+                // if index >= len, return a pointer to undefined
+                let ptr = self.builder.ins().select(larger, undefined_ptr, ptr);
+
+                let value = self
+                    .builder
+                    .ins()
+                    .load(POINTER_TYPE, MemFlags::new(), ptr, 0);
+                let vtable = self.builder.ins().load(
+                    POINTER_TYPE,
+                    MemFlags::new(),
+                    ptr,
+                    JValue::VALUE_SIZE as i32,
+                );
+
+                self.store_idx(result.0, value, vtable);
             }
             OpCode::Call {
                 result,
@@ -1172,14 +1245,17 @@ impl JSFunctionBuilder {
                 let func = self.use_idx(callee.0);
                 let this = self.use_idx(this.0);
 
-                let args = self.builder.use_var(*self.args_pointer.last().unwrap());
-                let len = self.builder.use_var(*self.args_len.last().unwrap());
+                let args = self.builder.use_var(self.stack_pointer);
+                let args = self.builder.ins().iadd_imm(args, *stack_offset as i64);
+
+                let len = self.builder.use_var(self.num_args);
                 let runtime = self.builder.use_var(self.runtime);
 
                 let callee = self
                     .builder
                     .ins()
                     .iconst(POINTER_TYPE, self.call as *mut u8 as i64);
+                    
                 let inst = self.builder.ins().call_indirect(
                     self.call_sigref,
                     callee,
@@ -1195,17 +1271,14 @@ impl JSFunctionBuilder {
             ///////////////////////////////////////////////////////////////
             OpCode::CreateBlock(b) => {
                 let bl = self.builder.create_block();
-                if self.block_offset == 0 {
-                    self.block_offset = bl.as_u32() as i32 - b.0 as i32;
-                }
+                self.blocks.insert(*b, bl);
             }
             OpCode::SwitchToBlock(b) => {
-                let b = ir::Block::with_number((b.0 as i32 + self.block_offset) as u32).unwrap();
+                let b = self.blocks[b];
                 self.builder.switch_to_block(b);
             }
-            OpCode::Jump { to } => {
-                let block =
-                    ir::Block::with_number((to.0 as i32 + self.block_offset) as u32).unwrap();
+            OpCode::Jump { to , line} => {
+                let block = self.blocks[to];
                 self.builder.ins().jump(block, &[]);
             }
             /*
@@ -1217,19 +1290,16 @@ impl JSFunctionBuilder {
             */
             OpCode::JumpIfFalse { value, to } => {
                 let v = self.use_idx(value.0);
-                let block =
-                    ir::Block::with_number((to.0 as i32 + self.block_offset) as u32).unwrap();
+                let block = self.blocks[to];
                 self.builder.ins().brz(v.0, block, &[]);
             }
             OpCode::JumpIfTrue { value, to } => {
                 let v = self.use_idx(value.0);
-                let block =
-                    ir::Block::with_number((to.0 as i32 + self.block_offset) as u32).unwrap();
+                let block = self.blocks[to];
                 self.builder.ins().brnz(v.0, block, &[]);
             }
             OpCode::JumpIfIterDone { to } => {
-                let block =
-                    ir::Block::with_number((to.0 as i32 + self.block_offset) as u32).unwrap();
+                let block = self.blocks[to];
                 let c = self.builder.use_var(self.iter_ended);
                 self.builder.ins().brnz(c, block, &[]);
             }

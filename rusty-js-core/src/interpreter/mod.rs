@@ -1,14 +1,16 @@
 use std::collections::HashMap;
 
+use likely_stable::likely;
+
 use crate::bultins::object::JObject;
 use crate::bultins::strings::JString;
 use crate::bytecodes::{Block, OpCode, Register, TempAllocValue};
+use crate::debug;
 use crate::error::Error;
 use crate::fast_iter::FastIterator;
 use crate::operations;
 use crate::runtime::Runtime;
 use crate::types::JValue;
-use crate::debug;
 
 /// todo: use actual cpu registers to speed up operations
 struct Registers([JValue; 3]);
@@ -28,6 +30,7 @@ impl std::ops::IndexMut<Register> for Registers {
 
 pub enum Res {
     Ok,
+    Break(Block),
     Return(JValue),
     Err(JValue),
 }
@@ -39,10 +42,9 @@ pub struct Interpreter<'a> {
 
     stack: &'a mut [JValue],
     capture_stack: Option<&'a mut [JValue]>,
-    args_offsets: Vec<usize>,
-    args_lens: Vec<usize>,
+    arg_len:usize,
 
-    blocks: HashMap<Block, Option<usize>>,
+    blocks: HashMap<Block, usize, crate::utils::nohasher::NoHasherBuilder>,
     need_jump: Option<Block>,
 
     /// in a try statement
@@ -65,8 +67,7 @@ impl<'a> Interpreter<'a> {
             r: Registers([JValue::UNDEFINED; 3]),
             stack: stack,
             capture_stack: None,
-            args_offsets: Vec::new(),
-            args_lens: Vec::new(),
+            arg_len:0,
             blocks: Default::default(),
             need_jump: None,
             catch_block: Vec::new(),
@@ -91,8 +92,8 @@ impl<'a> Interpreter<'a> {
             r: Registers([JValue::UNDEFINED; 3]),
             stack: stack,
             capture_stack: Some(capture_stack),
-            args_offsets: Vec::new(),
-            args_lens: Vec::new(),
+            arg_len:0,
+
             blocks: Default::default(),
             need_jump: None,
             catch_block: Vec::new(),
@@ -116,15 +117,82 @@ impl<'a> Interpreter<'a> {
         let mut i = 0;
 
         loop {
-            if i == codes.len() {
+            if i == codes.len(){
                 break;
             }
             let code = codes[i];
 
+            println!("run code {:#?}", code);
             if self.need_jump.is_none() {
+                //debug::debug!("run code {:#?}", code);
+
+                let mut re = Res::Ok;
+
+                if let OpCode::Loop { body_start, body_len } = code{
+                    'outer:loop{
+                        let mut code_index = body_start as usize;
+    
+                        while code_index < body_start as usize + body_len as usize{
+                            let code = codes[code_index];
+        
+                            if self.need_jump.is_none() {
+                                
+                                //debug::debug!("run code {:#?}", code);
+
+                                let r = self.run_code(&mut this, args, code, &mut code_index);
                 
-                debug::debug!("run code {:#?}", code);
-                let re = self.run_code(&mut this, args, code, &mut i);
+                                match r {
+                                    Res::Err(_) |
+                                    Res::Return(_)=> {
+                                        i = code_index;
+                                        re = r;
+                                        break 'outer;
+                                    },
+                                    Res::Break(exit) => {
+                                        i = body_start as usize + body_len as usize;
+                                        self.need_jump = Some(exit);
+                                        break 'outer;
+                                    }
+                                    Res::Ok => {}
+                                }
+                            } else {
+                                //debug::debug!("need jump {:?}", self.need_jump.unwrap());
+                
+                                if let Some(b) = self.blocks.get(&self.need_jump.unwrap()) {
+                                    // block not in loop
+                                    let b = *b;
+                                    if b < body_start as usize || b >= body_start as usize + body_len as usize{
+                                        i = b;
+                                        self.need_jump = None;
+
+                                        re = Res::Ok;
+                                        break 'outer;
+                                    
+                                    } else{
+                                        // block in loop
+                                        code_index = b;
+                                        self.need_jump = None;
+                                    }
+                                    
+                
+                                } else if let OpCode::SwitchToBlock(b) = code {
+                                    self.blocks.insert(b, code_index);
+                
+                                    //debug::debug!("switch to block {:?}", b);
+                                    // jump resolved
+                                    if self.need_jump.unwrap() == b {
+                                        self.need_jump = None;
+                                    }
+                
+                                    // jump not resolved, loop until next switch to block
+                                }
+                            };
+                            code_index += 1;
+                        };
+                    };
+                } else{
+                    re = self.run_code(&mut this, args, code, &mut i);
+                };
 
                 match re {
                     Res::Err(e) => {
@@ -134,24 +202,24 @@ impl<'a> Interpreter<'a> {
                         } else {
                             return Err(e);
                         }
-                    }
+                    },
+                    // the outermost context should not be break
+                    Res::Break(_) => {},
                     Res::Ok => {}
                     Res::Return(r) => return Ok(r),
                 }
             } else {
-                debug::debug!("need jump {:?}", self.need_jump.unwrap());
+                //debug::debug!("need jump {:?}", self.need_jump.unwrap());
 
                 if let Some(b) = self.blocks.get(&self.need_jump.unwrap()) {
                     // jump resolved
-                    if let Some(s) = b {
-                        i = *s;
-                        self.need_jump = None;
-                    }
-                }
-                if let OpCode::SwitchToBlock(b) = code {
-                    self.blocks.insert(b, Some(i));
+                    i = *b;
+                    self.need_jump = None;
 
-                    debug::debug!("switch to block {:?}", b);
+                } else if let OpCode::SwitchToBlock(b) = code {
+                    self.blocks.insert(b, i);
+
+                    //debug::debug!("switch to block {:?}", b);
                     // jump resolved
                     if self.need_jump.unwrap() == b {
                         self.need_jump = None;
@@ -176,13 +244,46 @@ impl<'a> Interpreter<'a> {
     ) -> Res {
         match code {
             OpCode::NoOp => {}
-            OpCode::Debugger => {}
+            OpCode::Debugger => {},
+            OpCode::Loop { body_start:_, body_len:_ } => {
+                // stack overflow
+                return Res::Ok; 
+            },
+            OpCode::Break{ exit } => {
+                //return Res::Ok;
+                return Res::Break(exit);
+            },
+            OpCode::BreakIfTrue { value, exit } => {
+                //return Res::Ok;
+                if self.r[value].to_bool(){
+                    return Res::Break(exit)
+                }
+            },
+            OpCode::BreakIfFalse { value, exit } => {
+                //return Res::Ok;
+                if !self.r[value].to_bool(){
+                    return Res::Break(exit)
+                }
+            },
+            OpCode::BreakIfIterDone{ exit } => {
+                //return Res::Ok;
+                if self.iter_done{
+                    return Res::Break(exit);
+                }
+            }
             OpCode::Add {
                 result,
                 left,
                 right,
             } => {
-                self.r[result] = self.r[left] + self.r[right];
+
+                let lhs = self.r[left];
+                let rhs = self.r[right];
+                if likely(lhs.is_number() && rhs.is_number()){
+                    unsafe{self.r[result] = JValue::Number(lhs.value.number + rhs.value.number)};
+                } else{
+                    self.r[result] = lhs + rhs;
+                }
             }
             OpCode::Sub {
                 result,
@@ -566,50 +667,68 @@ impl<'a> Interpreter<'a> {
             //            function
             ////////////////////////////////////////////////////////////////
             OpCode::CreateArg {
-                stack_offset,
+                stack_offset:_,
                 len: _,
             } => {
-                if self.args_lens.len() >= 1 {
-                    let offset = stack_offset as usize;
-                    self.args_offsets.push(offset);
-                    self.args_lens.push(0);
-                } else {
-                    self.args_offsets.push(stack_offset as usize);
-                    self.args_lens.push(0);
+
+            },
+            OpCode::PushArg {
+                value,
+                stack_offset,
+            } => {
+                self.stack[stack_offset as usize] = self.r[value];
+            }
+            OpCode::PushArgSpread {
+                value,
+                stack_offset,
+            } => {
+                self.stack[stack_offset as usize] = self.r[value].spread();
+            }
+            OpCode::FinishArgs {
+                base_stack_offset,
+                len,
+            } => {
+                //todo: unknown bug
+                let mut len = len as usize;
+                let mut i = base_stack_offset as usize;
+
+                while i < base_stack_offset as usize + len {
+
+                    let v = self.stack[i as usize];
+
+                    if v.is_spread(){
+                        let mut values = vec![];
+                        
+                        let iter =
+                            unsafe { FastIterator::new(v, crate::bytecodes::LoopHint::For) };
+                        loop {
+                            let offset = base_stack_offset as usize + len;
+                            let stack = &mut self.stack[offset..];
+
+                            let (done, error, value) = iter.next(*this, stack.as_mut_ptr());
+                            if error {
+                                return Res::Err(value);
+                            }
+                            values.push(value);
+                            if done {
+                                break;
+                            }
+                        };
+
+                        FastIterator::drop_(iter);
+                        len  += values.len() -1;
+                        i += values.len()-1;
+
+                        unsafe{
+                            let p = self.stack.as_mut_ptr().add(i);
+                            std::ptr::copy(p, p.add(values.len()), values.len());
+                            std::ptr::copy(values.as_ptr(), p, values.len());
+                        };
+                    }
+                    i += 1;
                 };
+                self.arg_len = len as usize;
             }
-            OpCode::PushArg { value, stack_offset } => {
-                let offset = *self.args_offsets.last().unwrap() + *self.args_lens.last().unwrap();
-                self.stack[offset] = self.r[value];
-                *self.args_lens.last_mut().unwrap() += 1;
-            }
-            OpCode::PushArgSpread { value, stack_offset } => {
-                let mut v = vec![];
-                let iter =
-                    unsafe { FastIterator::new(self.r[value], crate::bytecodes::LoopHint::For) };
-                loop {
-                    let offset =
-                        *self.args_offsets.last().unwrap() + *self.args_lens.last().unwrap();
-                    let stack = &mut self.stack[offset..];
-                    let (done, error, value) = iter.next(*this, stack.as_mut_ptr());
-                    if error {
-                        return Res::Err(value);
-                    }
-                    v.push(value);
-                    if done {
-                        break;
-                    }
-                }
-                let offset = *self.args_offsets.last().unwrap() + *self.args_lens.last().unwrap();
-                let stack = &mut self.stack[offset..];
-                unsafe { std::ptr::copy(v.as_ptr(), stack.as_mut_ptr(), v.len()) };
-                *self.args_lens.last_mut().unwrap() += v.len();
-            },
-            OpCode::FinishArgs{ base_stack_offset, len } => {
-                // in baseline compiled function, pushArgSpread is handled differently,
-                // args are spread when finish args
-                // final args len is then stored into register
-            },
 
             OpCode::ReadParam { result, index } => {
                 if index as usize >= args.len() {
@@ -627,48 +746,44 @@ impl<'a> Interpreter<'a> {
                     }
                 }
                 self.r[result] = JValue::Object(obj);
-            },
+            }
 
             OpCode::Call {
                 result,
                 this,
                 callee,
-                stack_offset: _,
+                stack_offset,
             } => {
-                let offset = *self.args_offsets.last_mut().unwrap();
-                let stack = &mut self.stack[offset..];
+                let stack = &mut self.stack[stack_offset as usize..];
                 let (v, error) = unsafe {
                     self.r[callee].call_raw(
                         self.runtime,
                         self.r[this],
                         stack.as_mut_ptr(),
-                        *self.args_lens.last().unwrap() as u32,
+                        self.arg_len as u32,
                     )
                 };
                 if error {
                     return Res::Err(v);
                 }
                 self.r[result] = v;
-                self.args_offsets.pop();
-                self.args_lens.pop();
             }
             OpCode::CallOptChain {
                 result,
                 this,
                 callee,
-                stack_offset: _,
+                stack_offset,
             } => {
                 if self.r[callee].is_null() || self.r[callee].is_undefined() {
                     self.r[result] = JValue::UNDEFINED;
                 } else {
-                    let offset = *self.args_offsets.last_mut().unwrap();
-                    let stack = &mut self.stack[offset..];
+                    let stack = &mut self.stack[stack_offset as usize..];
                     let (v, error) = unsafe {
                         self.r[callee].call_raw(
                             self.runtime,
                             self.r[this],
                             stack.as_mut_ptr(),
-                            *self.args_lens.last().unwrap() as u32,
+                            self.arg_len as u32,
                         )
                     };
                     if error {
@@ -676,67 +791,63 @@ impl<'a> Interpreter<'a> {
                     }
                     self.r[result] = v;
                 }
-                self.args_offsets.pop();
-                self.args_lens.pop();
             }
             OpCode::New {
                 result,
                 callee,
-                stack_offset: _,
+                stack_offset,
             } => {
-                let offset = *self.args_offsets.last_mut().unwrap();
-                let stack = &mut self.stack[offset..];
-               
+                let stack = &mut self.stack[stack_offset as usize..];
+
                 let constructor = self.r[callee];
                 let (v, error) = operations::invoke_new(
-                        constructor,
-                        self.runtime,
-                        stack.as_mut_ptr(),
-                        *self.args_lens.last().unwrap() as u32,
-                    );
+                    constructor,
+                    self.runtime,
+                    stack.as_mut_ptr(),
+                    self.arg_len as u32,
+                );
                 if error {
                     return Res::Err(v);
                 }
                 self.r[result] = v;
-
-                self.args_offsets.pop();
-                self.args_lens.pop();
-            },
+            }
             OpCode::NewTarget { result } => {
                 self.r[result] = operations::new_target(&self.runtime);
-            },
+            }
             OpCode::ImportMeta { result } => {
                 self.r[result] = operations::import_meta(&self.runtime);
-            },
+            }
 
             ////////////////////////////////////////////////////////////////////////
             //             blocks
             ////////////////////////////////////////////////////////////////////////
-            OpCode::CreateBlock(b) => {
-                self.blocks.insert(b, None);
-            }
+            OpCode::CreateBlock(_b) => {
+                //self.blocks.insert(b, None);
+            },
             OpCode::SwitchToBlock(b) => {
-                self.blocks.insert(b, Some(*index));
-            }
-            OpCode::Jump { to } => {
+                if !self.blocks.contains_key(&b){
+                    self.blocks.insert(b, *index);
+                }
+            },
+            OpCode::Jump { to, line:_ } => {
                 self.need_jump = Some(to);
-            }
+            },
             OpCode::JumpIfFalse { value, to } => {
                 if !self.r[value].to_bool() {
                     self.need_jump = Some(to);
                 }
-            }
+            },
             OpCode::JumpIfIterDone { to } => {
                 if self.iter_done {
                     self.iter_done = false;
                     self.need_jump = Some(to);
                 }
-            }
+            },
             OpCode::JumpIfTrue { value, to } => {
                 if self.r[value].to_bool() {
                     self.need_jump = Some(to);
                 }
-            }
+            },
             OpCode::EnterTry { catch_block } => {
                 self.catch_block.push(catch_block);
             }
@@ -918,56 +1029,84 @@ impl<'a> Interpreter<'a> {
                 if obj.is_object() {
                     unsafe { obj.remove_key_static_(field_id) }
                 }
-            },
+            }
 
-            OpCode::ReadSuperField { constructor_result, field, stack_offset } => {
+            OpCode::ReadSuperField {
+                constructor_result,
+                field,
+                stack_offset,
+            } => {
                 let stack = &mut self.stack[stack_offset as usize..];
-                let (v, err) = unsafe{
-                    operations::super_prop(&self.runtime, self.r[constructor_result.target()], self.r[field], stack.as_mut_ptr())
-                };
-                if err{
-                    return Res::Err(v)
-                }
-                self.r[constructor_result.value()] = v;
-            },
-            OpCode::ReadSuperFieldStatic { constructor_result, field_id, stack_offset } => {
-                let stack = &mut self.stack[stack_offset as usize..];
-                let (v, err) = unsafe{
-                    operations::super_prop_static(&self.runtime, self.r[constructor_result.target()], field_id, stack.as_mut_ptr())
-                };
-                if err{
-                    return Res::Err(v)
-                }
-                self.r[constructor_result.value()] = v;
-            },
-            OpCode::WriteSuperField { constructor_value, field, stack_offset } => {
-                let stack = &mut self.stack[stack_offset as usize..];
-                let (v, err) = unsafe{
-                    operations::super_write_prop(
-                        &self.runtime, 
-                        self.r[constructor_value.target()], 
+                let (v, err) = unsafe {
+                    operations::super_prop(
+                        &self.runtime,
+                        self.r[constructor_result.target()],
                         self.r[field],
-                        self.r[constructor_value.value()], 
-                        stack.as_mut_ptr())
+                        stack.as_mut_ptr(),
+                    )
                 };
-                if err{
-                    return Res::Err(v)
-                };
-            },
-            OpCode::WriteSuperFieldStatic { constructor_value, field, stack_offset } => {
+                if err {
+                    return Res::Err(v);
+                }
+                self.r[constructor_result.value()] = v;
+            }
+            OpCode::ReadSuperFieldStatic {
+                constructor_result,
+                field_id,
+                stack_offset,
+            } => {
                 let stack = &mut self.stack[stack_offset as usize..];
-                let (v, err) = unsafe{
+                let (v, err) = unsafe {
+                    operations::super_prop_static(
+                        &self.runtime,
+                        self.r[constructor_result.target()],
+                        field_id,
+                        stack.as_mut_ptr(),
+                    )
+                };
+                if err {
+                    return Res::Err(v);
+                }
+                self.r[constructor_result.value()] = v;
+            }
+            OpCode::WriteSuperField {
+                constructor_value,
+                field,
+                stack_offset,
+            } => {
+                let stack = &mut self.stack[stack_offset as usize..];
+                let (v, err) = unsafe {
+                    operations::super_write_prop(
+                        &self.runtime,
+                        self.r[constructor_value.target()],
+                        self.r[field],
+                        self.r[constructor_value.value()],
+                        stack.as_mut_ptr(),
+                    )
+                };
+                if err {
+                    return Res::Err(v);
+                };
+            }
+            OpCode::WriteSuperFieldStatic {
+                constructor_value,
+                field,
+                stack_offset,
+            } => {
+                let stack = &mut self.stack[stack_offset as usize..];
+                let (v, err) = unsafe {
                     operations::super_write_prop_static(
-                        &self.runtime, 
-                        self.r[constructor_value.target()], 
+                        &self.runtime,
+                        self.r[constructor_value.target()],
                         field,
-                        self.r[constructor_value.value()], 
-                        stack.as_mut_ptr())
+                        self.r[constructor_value.value()],
+                        stack.as_mut_ptr(),
+                    )
                 };
-                if err{
-                    return Res::Err(v)
+                if err {
+                    return Res::Err(v);
                 };
-            },
+            }
 
             OpCode::BindGetter {
                 obj,
@@ -1002,10 +1141,10 @@ impl<'a> Interpreter<'a> {
                 if obj.is_object() {
                     self.r[result] = JValue::Object(unsafe { obj.value.object.deep_clone() });
                 }
-            },
+            }
             OpCode::ExtendObject { obj, from } => {
-                unsafe{operations::extend_object(self.r[obj], self.r[from])};
-            },
+                unsafe { operations::extend_object(self.r[obj], self.r[from]) };
+            }
 
             ////////////////////////////////////////////////////////////////
             //           creations
@@ -1051,31 +1190,41 @@ impl<'a> Interpreter<'a> {
             OpCode::CreateRegExp { result, reg_id } => {
                 let r = self.runtime.get_regex(reg_id);
                 self.r[result] = JObject::with_regex(r).into();
-            },
-            OpCode::CreateTemplate { result, id, tagged } => {
-                let offset = *self.args_offsets.last_mut().unwrap();
-                let stack = &mut self.stack[offset..];
+            }
+            OpCode::CreateTemplate { result, id, stack_offset } => {
+                let stack = &mut self.stack[stack_offset as usize..];
 
                 self.r[result] = unsafe {
                     operations::create_template(
                         id.0,
                         stack.as_mut_ptr(),
-                        *self.args_lens.last().unwrap() as u32,
-                        tagged,
+                        self.arg_len as u32,
+                        false,
                     )
                 };
+            },
+            OpCode::CreateTaggedTemplate { result, id, stack_offset } => {
+                let stack = &mut self.stack[stack_offset as usize..];
 
-                self.args_lens.pop();
-                self.args_offsets.pop();
-            }
+                self.r[result] = unsafe {
+                    operations::create_template(
+                        id.0,
+                        stack.as_mut_ptr(),
+                        self.arg_len as u32,
+                        true,
+                    )
+                };
+            },
 
             OpCode::CreateClass { result, class_id } => {
                 let class = self.runtime.get_class(class_id);
-                
-                let obj = if self.is_global{
+
+                let obj = if self.is_global {
                     class.create_object_without_capture()
-                } else{
-                    class.create_object_with_capture(self.capture_stack.as_mut().unwrap().as_mut_ptr())
+                } else {
+                    class.create_object_with_capture(
+                        self.capture_stack.as_mut().unwrap().as_mut_ptr(),
+                    )
                 };
 
                 self.r[result] = obj.into();
@@ -1087,16 +1236,15 @@ impl<'a> Interpreter<'a> {
                 let super_proto = super_class.get_property_str("prototype").unwrap();
                 proto.set_property_str("__proto__", super_proto).unwrap();
 
-                if !super_class.is_object(){
+                if !super_class.is_object() {
                     return Res::Err(JValue::Error(Error::ClassExtendsNonCallable));
                 }
-                if c.is_object(){
-                    if let Some(c) = unsafe{c.value.object.as_class()}{
-                        c.super_ = Some(unsafe{super_class.value.object})
+                if c.is_object() {
+                    if let Some(c) = unsafe { c.value.object.as_class() } {
+                        c.super_ = Some(unsafe { super_class.value.object })
                     }
                 }
-            },
-            
+            }
         };
         Res::Ok
     }

@@ -59,23 +59,23 @@ impl FunctionBuilderContext {
         let mut v = vec![];
         let s = self.inner.to_mut();
         std::mem::swap(&mut s.need_done, &mut v);
-        
-        if self.inner.is_function_context || self.inner.is_global_context{
+
+        if self.inner.is_function_context || self.inner.is_global_context {
             return v;
         }
 
         let mut pa = self.inner.parent.clone();
         let mut should_break = false;
-        loop{
-            if should_break{
+        loop {
+            if should_break {
                 break;
             }
-            if let Some(p) = &pa{
-                if p.is_global_context{
+            if let Some(p) = &pa {
+                if p.is_global_context {
                     break;
-                } 
-                
-                if p.is_function_context{
+                }
+
+                if p.is_function_context {
                     should_break = true;
                 }
 
@@ -83,8 +83,8 @@ impl FunctionBuilderContext {
                 std::mem::swap(&mut p.to_mut().need_done, &mut f);
                 v.extend(f);
                 pa = p.parent.clone();
-            } else{
-                break
+            } else {
+                break;
             }
         }
         return v;
@@ -163,11 +163,11 @@ impl FunctionBuilderContext {
         self.inner.stack_offset
     }
 
-    pub fn increment_stack_offset(&self){
+    pub fn increment_stack_offset(&self) {
         self.inner.to_mut().stack_offset += 1;
     }
 
-    pub fn decrease_stack_offset(&self, n:usize){
+    pub fn decrease_stack_offset(&self, n: usize) {
         self.inner.to_mut().stack_offset -= n as u16;
     }
 

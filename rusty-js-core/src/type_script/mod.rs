@@ -1,78 +1,85 @@
 use std::collections::HashMap;
 
-
 mod object;
-
+mod interface;
+mod function;
 use object::ObjectInfo;
 
-pub struct TypeRegister{
-    pub names:HashMap<String, TypeId>,
-    pub types:Vec<TypeInfo>,
+use interface::InterfaceInfo;
+
+#[derive(Debug, Clone, PartialEq, PartialOrd, Hash)]
+pub struct TypeName{
+    name_space:u32,
+    priority:u32,
+    name:String
 }
 
-#[derive(Debug, Clone, Copy, Hash, PartialEq, Eq, PartialOrd, Ord)]
-pub struct TypeId(u32);
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct ObjectId(u32);
 
-pub struct FunctionInfo{
-    pub params:HashMap<String, Type>,
-    pub returns:Vec<Type>
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct InterfaceId(u32);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct FunctionId(u32);
+
+pub struct TypeRegister {
+    pub names: string_interner::StringInterner,
+
+    object_names:HashMap<TypeName, u32>,
+    objects:Vec<ObjectInfo>,
+
+    interface_names:HashMap<TypeName, u32>,
+    interfaces:Vec<InterfaceInfo>,
+
+    function_names:HashMap<TypeName, u32>,
+    functions:Vec<FunctionInfo>
 }
 
-pub enum TypeInfo{
-    Union(Type, Type),
-    Object(ObjectInfo),
-    Function(FunctionInfo)
+pub struct FunctionInfo {
+    pub params: HashMap<String, Type>,
+    pub returns: Vec<Type>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, PartialOrd)]
+#[derive(Debug, Clone, PartialEq, PartialOrd)]
 #[repr(u8)]
-pub enum Type{
+pub enum Type {
     Null,
     Undefined,
     Void,
     Unknown,
     Never,
     /// alias of string
-    String{
-        optional:bool
+    String {
+        optional: bool,
     },
     /// alias of number
-    Number{
-        optional:bool
+    Number {
+        optional: bool,
     },
-    BigInt{
-        optional:bool
+    BigInt {
+        optional: bool,
     },
     /// alias of boolean
-    Boolean{
-        optional:bool
+    Boolean {
+        optional: bool,
     },
     Any,
-    Union(TypeId, TypeId),
-    Function(TypeId),
-    Object{
+    Union(Box<Type>, Box<Type>),
+    Function{
         optional:bool,
-        object:TypeId
+        id:FunctionId,
     },
-    Array(TypeId),
-}
-
-impl TypeRegister{
-    pub fn new() -> TypeRegister{
-        let mut r = TypeRegister{
-            names:HashMap::new(),
-            types:Default::default()
-        };
-
-        r.names.insert("builtin Object.prototype".into(), TypeId(0));
-        r.types.push(TypeInfo::Object(ObjectInfo{
-            properties:HashMap::from_iter((&[
-                ("__proto__", Type::Null),
-                ("constructor", Type::Undefined),
-            ]).iter().map(|v|(v.0.to_owned(), v.1))),
-            prototype:Type::Null,
-        }));
-
-        return r;
+    Object {
+        optional: bool,
+        object: ObjectId,
+    },
+    Array{
+        ty:Box<Type>,
+        optional:bool
+    },
+    Interface{
+        interface:InterfaceId,
+        optional:bool,
     }
 }

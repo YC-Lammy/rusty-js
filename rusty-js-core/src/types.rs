@@ -45,13 +45,12 @@ unsafe impl Send for JValue {}
 
 impl std::hash::Hash for JValue {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
-        if self.is_string(){
-            unsafe{self.value.string.as_bytes().hash(state)}
-        } else{
+        if self.is_string() {
+            unsafe { self.value.string.as_bytes().hash(state) }
+        } else {
             state.write_usize(unsafe { std::mem::transmute(self.value) });
-            state.write_usize(self.type_pointer as *const _ as usize); 
+            state.write_usize(self.type_pointer as *const _ as usize);
         }
-        
     }
 }
 
@@ -166,6 +165,8 @@ pub struct JTypeVtable {
     instance_of: unsafe fn(JValueUnion, JValue) -> (JValue, bool),
     /// fn (obj, field) -> (result, error)
     In: unsafe fn(JValueUnion, JValue) -> (JValue, bool),
+
+    tag:u8,
 }
 
 impl JTypeVtable {
@@ -177,7 +178,19 @@ impl JTypeVtable {
     pub const UNDEFINED: Self = UNDEFINED_TYPE_POINTER;
     pub const BIGINT: Self = BIGINT_TYPE_POINTER;
     pub const NUMBER: Self = NUMBER_TYPE_POINTER;
+    pub const STRING:Self = STRING_TYPE_POINTER;
     pub const SYMBOL: Self = SYMBOL_TYPE_POINTER;
+    pub const OBJECT: Self = OBJECT_TYPE_POINTER;
+
+    // only string and object can be spread
+    pub const SPREAD_OBJECT: Self = JTypeVtable {
+        tag:10,
+        ..Self::OBJECT
+    };
+    pub const SPREAD_STRING: Self = JTypeVtable {
+        tag:11,
+        ..Self::STRING
+    };
 
     pub fn offset_add() -> i32 {
         (&Self::T.add as *const _ as usize - &Self::T as *const _ as usize) as i32
@@ -273,6 +286,8 @@ const NULL_TYPE_POINTER: JTypeVtable = JTypeVtable {
     remove_key_static: not_object::remove_key_static,
     instance_of: not_object::instance_of,
     In: not_object::In,
+
+    tag:0,
 };
 
 const UNDEFINED_TYPE_POINTER: JTypeVtable = JTypeVtable {
@@ -296,10 +311,8 @@ const UNDEFINED_TYPE_POINTER: JTypeVtable = JTypeVtable {
     remove_key_static: not_object::remove_key_static,
     instance_of: not_object::instance_of,
     In: not_object::In,
-};
 
-const REAL_UNDEFINED_TYPE_POINTER: JTypeVtable = JTypeVtable {
-    ..UNDEFINED_TYPE_POINTER
+    tag:1,
 };
 
 const TRUE_TYPE_POINTER: JTypeVtable = JTypeVtable {
@@ -323,6 +336,8 @@ const TRUE_TYPE_POINTER: JTypeVtable = JTypeVtable {
     remove_key_static: not_object::remove_key_static,
     instance_of: not_object::instance_of,
     In: not_object::In,
+
+    tag:2,
 };
 
 const FALSE_TYPE_POINTER: JTypeVtable = JTypeVtable {
@@ -346,6 +361,8 @@ const FALSE_TYPE_POINTER: JTypeVtable = JTypeVtable {
     remove_key_static: not_object::remove_key_static,
     instance_of: not_object::instance_of,
     In: not_object::In,
+
+    tag:3,
 };
 
 const NUMBER_TYPE_POINTER: JTypeVtable = JTypeVtable {
@@ -362,13 +379,15 @@ const NUMBER_TYPE_POINTER: JTypeVtable = JTypeVtable {
     lt: number::lt,
     lteq: number::lteq,
 
-    get: not_object::get,
-    get_static: not_object::get_static,
+    get: number::get,
+    get_static: number::get_static,
     set: not_object::set,
     set_static: not_object::set_static,
     remove_key_static: not_object::remove_key_static,
     instance_of: not_object::instance_of,
     In: not_object::In,
+
+    tag:4,
 };
 
 const BIGINT_TYPE_POINTER: JTypeVtable = JTypeVtable {
@@ -392,6 +411,8 @@ const BIGINT_TYPE_POINTER: JTypeVtable = JTypeVtable {
     remove_key_static: not_object::remove_key_static,
     instance_of: not_object::instance_of,
     In: not_object::In,
+
+    tag:5,
 };
 
 const STRING_TYPE_POINTER: JTypeVtable = JTypeVtable {
@@ -416,6 +437,8 @@ const STRING_TYPE_POINTER: JTypeVtable = JTypeVtable {
 
     instance_of: not_object::instance_of,
     In: not_object::In,
+
+    tag:6,
 };
 
 const SYMBOL_TYPE_POINTER: JTypeVtable = JTypeVtable {
@@ -439,6 +462,8 @@ const SYMBOL_TYPE_POINTER: JTypeVtable = JTypeVtable {
     remove_key_static: not_object::remove_key_static,
     instance_of: not_object::instance_of,
     In: not_object::In,
+
+    tag:7,
 };
 
 const OBJECT_TYPE_POINTER: JTypeVtable = JTypeVtable {
@@ -463,6 +488,8 @@ const OBJECT_TYPE_POINTER: JTypeVtable = JTypeVtable {
 
     instance_of: object::instance_of,
     In: object::In,
+
+    tag:8,
 };
 
 #[allow(non_snake_case)]
@@ -523,26 +550,64 @@ impl JValue {
         return self.type_pointer as *const _ == &FALSE_TYPE_POINTER;
     }
 
+    #[inline]
     pub fn is_number(&self) -> bool {
         return self.type_pointer as *const _ == &NUMBER_TYPE_POINTER;
     }
 
+    #[inline]
     pub fn is_bigint(&self) -> bool {
         return self.type_pointer as *const _ == &BIGINT_TYPE_POINTER;
     }
 
+    #[inline]
     pub fn is_string(&self) -> bool {
-        return self.type_pointer as *const _ == &STRING_TYPE_POINTER;
+        return self.type_pointer as *const _ == &STRING_TYPE_POINTER ||
+            self.type_pointer as *const _ == &JTypeVtable::SPREAD_STRING;
     }
 
+    #[inline]
     pub fn is_symbol(&self) -> bool {
         return self.type_pointer as *const _ == &SYMBOL_TYPE_POINTER;
     }
 
     pub fn is_object(&self) -> bool {
-        return self.type_pointer as *const JTypeVtable == &OBJECT_TYPE_POINTER;
+        return self.type_pointer as *const JTypeVtable == &OBJECT_TYPE_POINTER ||
+            self.type_pointer as *const JTypeVtable == &JTypeVtable::SPREAD_OBJECT;
     }
 
+    pub fn is_spread(&self) -> bool{
+        return self.type_pointer as *const _ == &JTypeVtable::SPREAD_STRING ||
+            self.type_pointer as *const JTypeVtable == &JTypeVtable::SPREAD_OBJECT;
+    }
+
+    /// if self is object or string, return a spread self, else return self
+    pub fn spread(self) -> Self{
+        if self.is_object(){
+            return JValue{
+                value:self.value,
+                type_pointer:&JTypeVtable::SPREAD_OBJECT
+            }
+        }
+        if self.is_string(){
+            return JValue{
+                value:self.value,
+                type_pointer:&JTypeVtable::SPREAD_STRING
+            }
+        }
+
+        return self
+    }
+
+    pub fn is_new_target(&self) -> bool {
+        if self.is_object() {
+            unsafe { self.value.object.is_new_target() }
+        } else {
+            false
+        }
+    }
+
+    #[inline]
     pub fn Number(n: f64) -> JValue {
         return JValue {
             value: JValueUnion { number: n },
@@ -550,6 +615,7 @@ impl JValue {
         };
     }
 
+    #[inline]
     pub fn BigInt(n: i64) -> JValue {
         return JValue {
             value: JValueUnion { bigint: n },
@@ -751,8 +817,10 @@ impl JValue {
             "symbol"
         } else if self.is_undefined() {
             "undefined"
-        } else {
+        } else if self.is_object(){
             "object"
+        } else{
+            "unknown"
         }
     }
 
@@ -803,9 +871,7 @@ impl JValue {
         stack: *mut JValue,
         argc: u32,
     ) -> (JValue, bool) {
-        
         if self.is_object() {
-            
             self.value.object.call(runtime, this, stack, argc)
         } else {
             println!("call");
@@ -816,7 +882,7 @@ impl JValue {
     pub fn call(self, ctx: JSFuncContext, this: JValue, args: &[JValue]) -> Result<JValue, JValue> {
         if !self.is_object() {
             return Err(JValue::Error(Error::TypeError(
-                "cannot call on non function".to_owned(),
+                format!("cannot call on non function, got {}, value {}", self.type_str(), unsafe{self.value.null}),
             )));
         }
         let runtime = Runtime::current();
@@ -832,10 +898,10 @@ impl JValue {
     }
 
     pub fn get_property(self, field: JValue) -> Result<JValue, JValue> {
-        if field.is_string(){
-            let s = unsafe{field.value.string.as_str()};
+        if field.is_string() {
+            let s = unsafe { field.value.string.as_str() };
             self.get_property_str(s)
-        } else{
+        } else {
             let s = field.to_string();
             self.get_property_str(&s)
         }
@@ -854,36 +920,38 @@ impl JValue {
 
     pub(crate) fn get_property_static_(self, field_id: u32) -> (JValue, bool) {
         let mut stack = Vec::with_capacity(128);
-        unsafe{ (self.type_pointer.get_static)(self.value, field_id, stack.as_mut_ptr())}
+        unsafe { (self.type_pointer.get_static)(self.value, field_id, stack.as_mut_ptr()) }
     }
 
     pub fn get_property_raw(self, field_id: u32, stack: *mut JValue) -> (JValue, bool) {
         unsafe { (self.type_pointer.get_static)(self.value, field_id, stack) }
     }
 
-    pub fn set_property(self, field: JValue, value: JValue) -> Result<(), JValue>{
-        if field.is_string(){
-            let s = unsafe{field.value.string.as_str()};
+    pub fn set_property(self, field: JValue, value: JValue) -> Result<(), JValue> {
+        if field.is_string() {
+            let s = unsafe { field.value.string.as_str() };
             self.set_property_str(s, value)
-        } else{
+        } else {
             let s = field.to_string();
             self.set_property_str(&s, value)
         }
     }
 
-    pub fn set_property_str(self, key: &str, value:JValue) -> Result<(), JValue>{
+    pub fn set_property_str(self, key: &str, value: JValue) -> Result<(), JValue> {
         let runtime = Runtime::current();
         let id = runtime.register_field_name(key);
 
         self.set_property_static(id, value)
     }
 
-    pub fn set_property_static(self, field_id: u32, value: JValue) -> Result<(), JValue>{
+    pub fn set_property_static(self, field_id: u32, value: JValue) -> Result<(), JValue> {
         let mut stack = Vec::with_capacity(128);
-        let (v, err) = unsafe{(self.type_pointer.set_static)(self.value, field_id, value, stack.as_mut_ptr())};
-        if err{
+        let (v, err) = unsafe {
+            (self.type_pointer.set_static)(self.value, field_id, value, stack.as_mut_ptr())
+        };
+        if err {
             Err(v)
-        } else{
+        } else {
             Ok(())
         }
     }
@@ -895,6 +963,35 @@ impl JValue {
         stack: *mut JValue,
     ) -> (JValue, bool) {
         unsafe { (self.type_pointer.set_static)(self.value, field_id, value, stack) }
+    }
+
+    pub fn to_object(self) -> JObject {
+        use crate::bultins::object::JObjectValue;
+
+        if self.is_object() {
+            return unsafe { self.value.object };
+        }
+
+        let obj = JObject::new();
+        unsafe {
+            if self.is_string() {
+                obj.set_inner(JObjectValue::String(self.value.string));
+            }
+            if self.is_bigint() {
+                obj.set_inner(JObjectValue::BigInt(self.value.bigint));
+            }
+            if self.is_bool() {
+                obj.set_inner(JObjectValue::Boolean(self.is_true()));
+            }
+            if self.is_number() {
+                obj.set_inner(JObjectValue::Number(self.value.number));
+            }
+
+            if self.is_symbol() {
+                obj.set_inner(JObjectValue::Symbol(self.value.symbol));
+            }
+        }
+        return obj;
     }
 
     pub(crate) unsafe fn trace(self) {
@@ -1167,6 +1264,8 @@ impl ToString for JValue {
 
 mod number {
 
+    use crate::Runtime;
+
     use super::{JValue, JValueUnion};
 
     pub(crate) unsafe fn add(value: JValueUnion, rhs: JValue) -> (JValue, bool) {
@@ -1319,7 +1418,7 @@ mod number {
             JValue::Number(value.number)
         } else if rhs.is_string() {
             if let Ok(v) = rhs.value.string.parse::<f64>() {
-                JValue::Number(1.0)
+                JValue::Number(value.number.powf(v))
             } else {
                 JValue::Number(f64::NAN)
             }
@@ -1515,6 +1614,43 @@ mod number {
             (JValue::TRUE, false)
         } else {
             (JValue::FALSE, false)
+        }
+    }
+
+    pub(crate) fn get(value: JValueUnion, field:JValue, stack:*mut JValue) -> (JValue, bool){
+        let rt = Runtime::current();
+        let field = if field.is_string(){
+            rt.register_field_name(unsafe{field.value.string.as_str()})
+        } else{
+            rt.regester_dynamic_var_name(&field.to_string())
+        };
+        get_static(value, field, stack)
+    }
+
+    pub(crate) fn get_static(value: JValueUnion, field: u32, stack: *mut JValue) -> (JValue, bool){
+        use crate::utils::string_interner::NAMES;
+        let rt = Runtime::current();
+        let re = 
+        if field == NAMES["toExponential"]{
+            rt.prototypes.number.get_property_static(field, stack)
+        } else if field == NAMES["toFixed"]{
+            rt.prototypes.number.get_property_static(field, stack)
+        } else if field == NAMES["toLocaleString"]{
+            rt.prototypes.number.get_property_static(field, stack)
+        } else if field == NAMES["toPrecision"]{
+            rt.prototypes.number.get_property_static(field, stack)
+        } else if field == NAMES["toString"]{
+            rt.prototypes.number.get_property_static(field, stack)
+        } else if field == NAMES["valueOf"]{
+            rt.prototypes.number.get_property_static(field, stack)
+        } else{
+            None
+        };
+
+        if re.is_none(){
+            return (JValue::UNDEFINED, false)
+        } else{
+            return (re.unwrap(), false)
         }
     }
 }
@@ -2461,13 +2597,12 @@ mod object {
         field: JValue,
         stack: *mut JValue,
     ) -> (JValue, bool) {
-        if field.is_string(){
+        if field.is_string() {
             let s = field.value.string.as_str();
             obj.object.inner.get_property(s, stack)
-        } else{
+        } else {
             obj.object.inner.get_property(&field.to_string(), stack)
         }
-        
     }
 
     pub(crate) unsafe fn get_static(
@@ -2484,14 +2619,14 @@ mod object {
         value: JValue,
         stack: *mut JValue,
     ) -> (JValue, bool) {
-        if field.is_string(){
+        if field.is_string() {
             let s = field.value.string.as_str();
             obj.object.inner.to_mut().set_property(s, value, stack)
-        } else{
+        } else {
             obj.object
-            .inner
-            .to_mut()
-            .set_property(&field.to_string(), value, stack)
+                .inner
+                .to_mut()
+                .set_property(&field.to_string(), value, stack)
         }
     }
 
@@ -2552,7 +2687,11 @@ mod not_object {
         )
     }
 
-    pub(crate) fn get_static(_value: JValueUnion, _rhs: u32, _stack: *mut JValue) -> (JValue, bool) {
+    pub(crate) fn get_static(
+        _value: JValueUnion,
+        _rhs: u32,
+        _stack: *mut JValue,
+    ) -> (JValue, bool) {
         (
             JValue::Error(Error::TypeError(
                 "cannot read property of non object".into(),
@@ -2611,6 +2750,7 @@ mod symbol {
         todo!("TypeError: cannot convert Symbol to primitives.")
     }
 }
+
 
 #[test]
 fn test_jvalue_size() {

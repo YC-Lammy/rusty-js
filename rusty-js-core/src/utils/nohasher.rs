@@ -11,7 +11,7 @@ impl Hasher for NoHasher {
         return self.value;
     }
 
-    fn write(&mut self, bytes: &[u8]) {
+    fn write(&mut self, _bytes: &[u8]) {
         unimplemented!("nohasher does not support bytes.")
     }
 

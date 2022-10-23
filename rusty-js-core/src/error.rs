@@ -15,8 +15,12 @@ pub enum Error {
     InvalidExpression { pos: Range<u32> },
     InvalideIterator { msg: &'static str },
 
+    ImportError(String),
+
     TypeError(String),
     SyntaxError(String),
+    ReferenceError(String),
+    RangeError(String),
     Value(JValue),
     User(Arc<dyn Any>),
 }

@@ -4,7 +4,7 @@ use std::ops;
 pub struct PropFlag(u8);
 
 impl PropFlag {
-    pub const NONE:PropFlag = PropFlag(0);
+    pub const NONE: PropFlag = PropFlag(0);
     pub const ENUMERABLE: PropFlag = PropFlag(0b00000001);
     pub const WRITABLE: PropFlag = PropFlag(0b00000010);
     pub const CONFIGURABLE: PropFlag = PropFlag(0b00000100);
@@ -12,7 +12,7 @@ impl PropFlag {
     pub const SETTER: PropFlag = PropFlag(0b00010000);
 
     /// WRITABLE and CONFIGURABLE
-    pub const BUILTIN: PropFlag = PropFlag(0b00000010 | 0b00000100);
+    pub const BUILTIN: PropFlag = PropFlag(Self::WRITABLE.0 | Self::CONFIGURABLE.0);
 
     ///
     pub const THREE: PropFlag = PropFlag(0b00000001 | 0b00000010 | 0b00000100);
