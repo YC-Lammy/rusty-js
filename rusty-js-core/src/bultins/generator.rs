@@ -1,50 +1,72 @@
+use std::ops::DerefMut;
+use std::pin::Pin;
 use std::sync::Arc;
 
-use corosensei::stack::DefaultStack;
-use corosensei::{Coroutine, CoroutineResult, Yielder};
+use futures::lock::Mutex as FutureMutex;
+use parking_lot::Mutex;
 
-use crate::types::JValue;
+use crate::{baseline, Promise};
+use crate::{error::Error, types::JValue, utils::string_interner::NAMES, JObject, Runtime};
+
+use super::flag::PropFlag;
 
 pub enum GeneratorResult {
+    Await(JValue),
     Yield(JValue),
-    Return(JValue),
-    Error(JValue),
-    Finished,
 }
 
-pub struct Generator {
-    is_finished: bool,
-    func: Arc<dyn Fn(&Yielder<JValue, JValue>, JValue) -> Result<JValue, JValue>>,
-    coroutine: Coroutine<JValue, JValue, Result<JValue, JValue>, DefaultStack>,
+//#[cfg(nightly)]
+#[derive(Clone)]
+pub struct JSGenerator {
+    pub(crate) is_async: bool,
+    pub(crate) generator: Arc<Mutex<dyn Iterator<Item = Result<JValue, JValue>>>>,
+    // stores done or not
+    lock: Arc<FutureMutex<bool>>,
 }
 
-impl Generator {
-    pub fn next(&mut self, input: JValue) -> GeneratorResult {
-        if self.is_finished {
-            return GeneratorResult::Finished;
-        }
-        let re = self.coroutine.resume(input);
-        match re {
-            CoroutineResult::Return(r) => {
-                self.is_finished = true;
+impl JSGenerator {
+    pub fn resume(&self, mut value: JValue, runtime: &Runtime) -> Result<JValue, JValue> {
+        if self.is_async {
+            let lock = self.lock.clone();
+            let generator = self.generator.clone();
 
-                match r {
-                    Ok(v) => GeneratorResult::Return(v),
-                    Err(e) => GeneratorResult::Error(e),
+            // create a future
+            let f = async move {
+                let lock_guard = lock.lock().await;
+
+                if *lock_guard {
+                    let obj = JObject::new();
+                    obj.insert_property(NAMES["value"], JValue::UNDEFINED, PropFlag::THREE);
+                    obj.insert_property(NAMES["done"], true.into(), PropFlag::THREE);
+                    return Ok(obj.into());
+                };
+
+                let mut regs = [JValue::UNDEFINED; 3];
+
+                let re = loop {
+                    let runtime = Runtime::current();
+                };
+
+                drop(lock_guard);
+                return re;
+            };
+
+            let p = runtime.to_mut().run_async(f);
+            let obj = JObject::with_promise(p);
+
+            return Ok(obj.into());
+        } else {
+            let value = self.generator.lock().next();
+
+            match value {
+                Some(v) => v,
+                None => {
+                    let obj = JObject::new();
+                    obj.insert_property(NAMES["value"], JValue::UNDEFINED, PropFlag::THREE);
+                    obj.insert_property(NAMES["done"], true.into(), PropFlag::THREE);
+                    return Ok(obj.into());
                 }
             }
-            CoroutineResult::Yield(y) => GeneratorResult::Yield(y),
-        }
-    }
-}
-
-impl Clone for Generator {
-    fn clone(&self) -> Self {
-        let func = self.func.clone();
-        Self {
-            is_finished: false,
-            func: self.func.clone(),
-            coroutine: Coroutine::new(move |y, i| (func)(y, i)),
         }
     }
 }

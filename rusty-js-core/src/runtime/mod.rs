@@ -1,13 +1,17 @@
 use std::alloc::Layout;
 use std::collections::HashMap;
+use std::future::Future;
+use std::pin::Pin;
+use std::sync::Weak;
 use std::sync::atomic::AtomicUsize;
 use std::sync::Arc;
 
 use parking_lot::RwLock;
-use string_interner::{DefaultBackend, DefaultSymbol, StringInterner, Symbol};
 
 //mod runtime_context;
-mod async_executor;
+//mod async_executor;
+mod bigint_allocator;
+mod finalize_registry;
 mod gc;
 mod import_resolver;
 mod object_allocater;
@@ -17,17 +21,23 @@ mod string_allocator;
 use import_resolver::ImportAssertion;
 use import_resolver::ImportResolver;
 
+use finalize_registry::FinalizeRegistry;
+
 pub use gc::GcFlag;
 
-pub use async_executor::*;
+//pub use async_executor::*;
 pub use profiler::Profiler;
 
 use crate::bultins;
 use crate::bultins::class::JSClass;
-use crate::bultins::function::{JSFuncContext, JSFunction};
+use crate::bultins::function::{JSContext, JSFunction};
 use crate::bultins::object::{JObject, JObjectInner};
+use crate::bultins::strings::JSString;
+use crate::bultins::JSBigInt;
+use crate::bytecodes::function_builder_context::FunctionBuilderContext;
 use crate::types::JValue;
-use crate::utils::nohasher;
+use crate::utils::string_interner::StringInterner;
+use crate::utils::string_interner::NAMES;
 
 #[derive(Debug, Clone, Copy, Hash, PartialEq, Eq, PartialOrd, Ord)]
 pub struct FuncID(pub(crate) u32);
@@ -48,10 +58,10 @@ pub struct StringID(pub(crate) u32);
 pub struct TemplateID(pub(crate) u32);
 
 #[derive(Debug, Clone, Copy, Hash, PartialEq, Eq, PartialOrd, Ord)]
-pub struct FinalizationRegistryId(pub(crate) u32);
+pub struct ModuleId(u32);
 
 #[derive(Debug, Clone, Copy, Hash, PartialEq, Eq, PartialOrd, Ord)]
-pub(crate) struct ModuleId(u32);
+pub struct AsyncId(usize);
 
 /// a Variable declared on the global context
 #[derive(Debug, Clone, Copy, Hash)]
@@ -62,6 +72,7 @@ pub(crate) enum Variable {
     Let(JValue),
     /// const declare
     Const(JValue),
+    // todo: var on stack
     /// a variable imported from a module
     Import {
         /// id of the import module
@@ -77,6 +88,21 @@ pub(crate) enum Variable {
     },
 }
 
+enum ImportVariable {
+    /// a variable imported from a module
+    Import {
+        /// id of the import module
+        id: ModuleId,
+        /// the variable name
+        original_name: u32,
+    },
+    /// a default export of a module
+    ImportDefault(ModuleId),
+    // a module object
+    ImportModule {
+        id: ModuleId,
+    },
+}
 
 /// a variable exported by the parent module
 enum ExportVariable {
@@ -95,7 +121,7 @@ enum ExportVariable {
         id: ModuleId,
     },
     /// import * from module
-    /// 
+    ///
     /// import the namespace of a module
     ImportModule {
         id: ModuleId,
@@ -112,60 +138,71 @@ thread_local! {
     pub static JS_RUNTIME: Option<Arc<Runtime>> = None;
 }
 
-const DEFAULT_STACK_SIZE: usize = 1048576 / std::mem::size_of::<JValue>();
+pub const DEFAULT_STACK_SIZE: usize = 4096 * 256 / std::mem::size_of::<JValue>();
+const NUM_WORKER_THREAD: usize = 3;
 
 pub struct Runtime {
+    weak_ref:Option<Weak<Self>>,
+
     strict_mode: bool,
 
-    obj_field_names: StringInterner,
-    dynamic_var_names: StringInterner,
+    parser_globals: swc_common::Globals,
+    function_builder_context:FunctionBuilderContext,
+
+    obj_field_names: RwLock<StringInterner>,
+    dynamic_var_names: RwLock<StringInterner>,
 
     dynamic_var_suffix: Option<String>,
 
     constants: Vec<JValue>,
 
-    strings: StringInterner<DefaultBackend<usize>>,
+    strings: StringInterner,
 
+    /// the stack is used for storing variables and call frames,
     pub(crate) stack: Box<[JValue; DEFAULT_STACK_SIZE]>,
-    pub(crate) async_stack: Box<[JValue; DEFAULT_STACK_SIZE]>,
-    aync_stack_offset: usize,
+    /// the operational stack is used for operations
+    /// such as calling getters and setters,
+    /// all values are disposed after one call
+    pub(crate) operational_stack: Box<[JValue; DEFAULT_STACK_SIZE]>,
 
     object_allocator: object_allocater::ObjectAllocator,
     string_allocator: string_allocator::StringAllocator,
+    bigint_allocator: bigint_allocator::BigIntAllocator,
 
     /// variable that belongs to a module are formatted with { name @ moduleID }
-    variables: HashMap<u32, Variable, nohasher::NoHasherBuilder>,
+    pub(crate) variables: HashMap<u32, Variable>,
 
     functions: Vec<Option<Arc<JSFunction>>>,
     classes: Vec<Option<Arc<JSClass>>>,
-    regexs: Vec<Arc<bultins::regex::RegExp>>,
+    regexs: Vec<Box<bultins::regex::RegExp>>,
     templates: Vec<bultins::strings::Template>,
 
     pub global: JValue,
     pub global_this: JObject,
     pub prototypes: bultins::BuiltinPrototypes,
 
-    pub(crate) new_target: JValue,
+    pub new_target: JValue,
     pub(crate) import_meta: JValue,
 
     import_resolver: Option<Arc<RwLock<dyn ImportResolver>>>,
     modules: Vec<Module>,
+
     /// temporary map to store exports
     exported_variables: HashMap<String, ExportVariable>,
 
-    pub(crate) async_executor: async_executor::AsyncExecutor<JValue>,
-    pub(crate) generator_executor: async_executor::AsyncExecutor<JValue>,
+    futures: Vec<Pin<Box<dyn Future<Output = Result<JValue, JValue>>>>>,
+    async_stacks: Vec<&'static [JValue]>,
 
-    pub(crate) finalize_registry:
-        HashMap<FinalizationRegistryId, (JObject, Vec<(JObject, JValue)>)>,
+    pub(crate) finalize_registry: FinalizeRegistry,
 
     /// a reference counted user owned value
     user_owned: HashMap<JValue, AtomicUsize>,
 
-    /// must be private to avoid cloning
-    ///
-    /// sends signal to the garbage collecting thread
-    garbage_collect_signal: crossbeam_channel::Sender<()>,
+    pub(crate) worker_task_sender: crossbeam_channel::Sender<Box<dyn FnOnce() + Sync + Send>>,
+
+    pub(crate) baseline_context: inkwell::context::Context,
+    pub(crate) baseline_module: inkwell::module::Module<'static>,
+    pub(crate) baseline_engine: inkwell::execution_engine::ExecutionEngine<'static>,
 }
 
 unsafe impl Sync for Runtime {}
@@ -175,37 +212,61 @@ impl Runtime {
     pub fn new() -> Arc<Self> {
         // allocate without writing on stack to prevent stackoverflow
         let stack = unsafe {
-            let ptr = std::alloc::alloc(Layout::new::<[JValue; DEFAULT_STACK_SIZE]>())
+            let ptr = std::alloc::alloc_zeroed(Layout::new::<[JValue; DEFAULT_STACK_SIZE]>())
+                as *mut [JValue; DEFAULT_STACK_SIZE];
+            Box::from_raw(ptr)
+        };
+        let op_stack = unsafe {
+            let ptr = std::alloc::alloc_zeroed(Layout::new::<[JValue; DEFAULT_STACK_SIZE]>())
                 as *mut [JValue; DEFAULT_STACK_SIZE];
             Box::from_raw(ptr)
         };
 
-        let async_stack = unsafe {
-            let ptr = std::alloc::alloc(Layout::new::<[JValue; DEFAULT_STACK_SIZE]>())
-                as *mut [JValue; DEFAULT_STACK_SIZE];
-            Box::from_raw(ptr)
-        };
+        let (worker_send, worker_recv) = crossbeam_channel::unbounded();
 
-        let (gc_sender, gc_recv) = crossbeam_channel::unbounded();
+        static mut LLVM_TARGET_INIT: bool = false;
+
+        if !unsafe { LLVM_TARGET_INIT } {
+            inkwell::targets::Target::initialize_native(&Default::default())
+                .expect("failed to initialize llvm");
+            unsafe { LLVM_TARGET_INIT = true };
+        }
+
+        let baseline_context = inkwell::context::Context::create();
+        let baseline_module: inkwell::module::Module =
+            unsafe { std::mem::transmute(baseline_context.create_module("baseline")) };
+        let baseline_engine = unsafe {
+            std::mem::transmute(
+                baseline_module
+                    .create_jit_execution_engine(inkwell::OptimizationLevel::None)
+                    .unwrap(),
+            )
+        };
 
         let runtime = Arc::new(Self {
+            weak_ref:None,
+
             strict_mode: false,
 
-            obj_field_names: crate::utils::string_interner::INTERNER.clone(),
-            dynamic_var_names: StringInterner::new(),
+            parser_globals: swc_common::Globals::new(),
+            function_builder_context: FunctionBuilderContext::new(),
+
+            obj_field_names: RwLock::new(crate::utils::string_interner::INTERNER.clone()),
+            dynamic_var_names: RwLock::new(crate::utils::string_interner::INTERNER.clone()),
             dynamic_var_suffix: None,
 
             stack: stack,
-            async_stack,
-            aync_stack_offset: 0,
+            operational_stack: op_stack,
 
             object_allocator: Default::default(),
             string_allocator: Default::default(),
+            bigint_allocator: Default::default(),
 
             constants: vec![],
             regexs: vec![],
             strings: StringInterner::new(),
-            variables: HashMap::default(),
+            variables: Default::default(),
+
             functions: vec![],
             classes: vec![],
             templates: vec![],
@@ -223,47 +284,59 @@ impl Runtime {
             modules: Default::default(),
             exported_variables: Default::default(),
 
-            async_executor: async_executor::AsyncExecutor::new(),
-            generator_executor: async_executor::AsyncExecutor::new(),
+            futures: Vec::new(),
+            async_stacks: Vec::new(),
 
             finalize_registry: Default::default(),
             user_owned: Default::default(),
 
-            garbage_collect_signal: gc_sender,
+            worker_task_sender: worker_send,
+
+            baseline_context: baseline_context,
+            baseline_engine: baseline_engine,
+            baseline_module: baseline_module,
         });
 
+        runtime.to_mut().weak_ref = Some(Arc::downgrade(&runtime));
+
         // allocate global object
-        runtime.to_mut().global_this = JObject {
-            inner: runtime.allocate_obj(),
-        };
+        runtime.to_mut().global_this = runtime.create_object();
 
         runtime.to_mut().global = runtime.global_this.into();
 
-        runtime.to_mut().import_meta = JObject {
-            inner: runtime.allocate_obj(),
-        }
-        .into();
+        runtime.to_mut().import_meta = runtime.create_object().into();
 
         // allocate builtin prototypes
         runtime.to_mut().prototypes.init(runtime.to_mut());
 
-        // get the raw pointer to avoid runtime being moved
-        let r = runtime.as_ref() as *const Runtime as usize;
+        let rt = Arc::into_raw(runtime.clone());
+        unsafe{Arc::decrement_strong_count(rt)};
+        let rt = rt as usize;
 
-        // todo: avoid unsafe operation
-        std::thread::spawn(move || {
-            loop {
-                if let Ok(_) = gc_recv.recv() {
-                    // if the channel is alive, the runtime is alive
-                    let rt = unsafe { (r as *mut Runtime).as_mut().unwrap() };
-                    unsafe { rt.string_allocator.garbage_collect() };
-                    rt.object_allocator.garbage_collect();
-                    rt.clean_functions();
-                } else {
-                    break;
+        for _ in 0..NUM_WORKER_THREAD {
+            let recv = worker_recv.clone();
+
+            std::thread::spawn(move || loop {
+
+                unsafe{
+                    Arc::increment_strong_count(rt as *const Runtime);
                 };
-            }
-        });
+
+                let rt = unsafe{Arc::from_raw(rt as *const Runtime)};
+
+                match recv.recv() {
+                    Ok(task) => {
+
+                        rt.attach();
+                        (task)();
+                        Runtime::deattach();
+                    }
+                    Err(_e) => {
+                        break;
+                    }
+                };
+            });
+        }
 
         runtime.clone().attach();
         // enable ecma features
@@ -343,9 +416,82 @@ impl Runtime {
         );
 
         let script = re.unwrap();
-        let mut builder = crate::baseline::bytecode_builder::FunctionBuilder::new(self.clone());
+        self.run_module(script)
+    }
 
-        for i in script.body {
+    /// optimize the sourse code before executing
+    ///
+    /// optimized code does not guarantee variable declarations,
+    /// smaller programs are recommanded to use execute()
+    /// as optimization increases startup time
+    pub fn execute_optimized(
+        self: Arc<Self>,
+        filename: &str,
+        script: &str,
+    ) -> Result<JValue, crate::error::Error> {
+        use swc_common::{FileName, SourceFile};
+        use swc_ecmascript::visit::Fold;
+
+        let src = SourceFile::new(
+            FileName::Custom(filename.to_string()),
+            false,
+            FileName::Anon,
+            script.to_string(),
+            swc_common::BytePos(1),
+        );
+        let mut v = Vec::new();
+        let re = swc_ecmascript::parser::parse_file_as_module(
+            &src,
+            swc_ecmascript::parser::Syntax::Es(swc_ecmascript::parser::EsConfig {
+                jsx: false,
+                fn_bind: true,
+                decorators: true,
+                decorators_before_export: true,
+                export_default_from: true,
+                import_assertions: true,
+                private_in_object: true,
+                allow_super_outside_method: false,
+                allow_return_outside_function: false,
+            }),
+            swc_ecmascript::ast::EsVersion::Es2022,
+            None,
+            &mut v,
+        );
+
+        let module = re.unwrap();
+
+        let module = swc_common::GLOBALS.set(&self.parser_globals, || {
+            let unresolved_mark = swc_common::Mark::new();
+            let top_level_mark = swc_common::Mark::new();
+
+            let mut r = swc_common::chain!(
+                swc_ecmascript::transforms::resolver(unresolved_mark, top_level_mark, false),
+                swc_ecmascript::transforms::optimization::simplifier(
+                    unresolved_mark,
+                    swc_ecmascript::transforms::optimization::simplify::Config {
+                        dce: swc_ecmascript::transforms::optimization::simplify::dce::Config {
+                            module_mark: None,
+                            top_level: true,
+                            top_retain: Default::default(),
+                        },
+                        inlining: Default::default(),
+                        expr: Default::default(),
+                    },
+                )
+            );
+
+            r.fold_module(module)
+        });
+        self.run_module(module)
+    }
+
+    fn run_module(
+        self: Arc<Self>,
+        module: swc_ecmascript::ast::Module,
+    ) -> Result<JValue, crate::error::Error> {
+        let mut builder = crate::bytecodes::bytecode_builder::FunctionBuilder::new_with_context(self.clone(), self.function_builder_context.clone(), false, false);
+
+        for i in module.body {
             match i {
                 swc_ecmascript::ast::ModuleItem::Stmt(s) => {
                     builder.translate_statement(None, &s)?;
@@ -659,6 +805,7 @@ impl Runtime {
                                 match i {
                                     swc_ecmascript::ast::ImportSpecifier::Default(d) => {
                                         let key = self.regester_dynamic_var_name(&d.local.sym);
+
                                         self.to_mut()
                                             .variables
                                             .insert(key, Variable::ImportDefault(module_id));
@@ -680,8 +827,8 @@ impl Runtime {
                                         let key = self
                                             .to_mut()
                                             .dynamic_var_names
+                                            .write()
                                             .get_or_intern(import_name)
-                                            .to_usize()
                                             as u32;
 
                                         if !self.modules[module_id.0 as usize]
@@ -691,9 +838,10 @@ impl Runtime {
                                             return Err(crate::error::Error::ImportError(format!("The requested module '{}' does not provide an export named '{}'", self.modules[module_id.0 as usize].name.as_str(), import_name)));
                                         };
 
-                                        let k = self.regester_dynamic_var_name(&n.local.sym);
+                                        let key = self.regester_dynamic_var_name(&n.local.sym);
+
                                         self.to_mut().variables.insert(
-                                            k,
+                                            key,
                                             Variable::Import {
                                                 id: module_id,
                                                 original_name: key,
@@ -702,6 +850,7 @@ impl Runtime {
                                     }
                                     swc_ecmascript::ast::ImportSpecifier::Namespace(n) => {
                                         let key = self.regester_dynamic_var_name(&n.local.sym);
+
                                         self.to_mut()
                                             .variables
                                             .insert(key, Variable::ImportModule { id: module_id });
@@ -724,14 +873,30 @@ impl Runtime {
         }
 
         let bytecodes = builder.bytecode;
+        let op_stack = builder.ctx.max_stack_offset() as usize;
 
+        let bytecodes = crate::baseline::optimize(bytecodes);
+
+        let mut cl = crate::interpreter::clousure::Clousure::create(&bytecodes);
+        let re = cl.run(
+            &self,
+            self.to_mut().stack.as_mut_slice(),
+            &mut self.to_mut().stack.as_mut_slice()[op_stack..],
+            None,
+            None,
+            self.global,
+            &[],
+        );
+
+        /*
         let mut intpr =
-            crate::interpreter::Interpreter::global(&self, self.to_mut().stack.as_mut_slice());
+            crate::interpreter::Interpreter::global(&self, self.to_mut().stack.as_mut_slice(), op_stack);
 
         let re = intpr.run(self.global, &[], &bytecodes);
+        */
 
         // finish all the async tasks
-        self.to_mut().finish_async();
+        self.finish_async();
 
         match re {
             Ok(v) => Ok(v),
@@ -772,7 +937,8 @@ impl Runtime {
         let mut oldsuffix = Some(format!("@{}", self.modules.len()));
         std::mem::swap(&mut oldsuffix, &mut self.to_mut().dynamic_var_suffix);
 
-        self.clone().execute(name, &script)?;
+        // variables in module doesn't matter anyway, so we optimize it out
+        self.clone().execute_optimized(name, &script)?;
 
         self.to_mut().global = old_global;
         self.to_mut().strict_mode = old_strict;
@@ -787,24 +953,16 @@ impl Runtime {
 
         for (name, v) in e {
             // a name without @moduleID suffix
-            let key = self
-                .to_mut()
-                .dynamic_var_names
-                .get_or_intern(name)
-                .to_usize() as u32;
+            let key = self.to_mut().dynamic_var_names.write().get_or_intern(name) as u32;
             exports.insert(key, v);
         }
 
-        let default_export_key = self
-            .to_mut()
-            .dynamic_var_names
-            .get_or_intern_static("#default export")
-            .to_usize() as u32;
+        let default_export_key = NAMES["#default export"];
 
         self.to_mut().modules.push(Module {
             name: name.to_owned(),
             exports: exports,
-            default_export: self.get_variable(default_export_key).0,
+            default_export: self.get_variable(default_export_key.0).unwrap(),
         });
 
         return Ok(ModuleId(self.modules.len() as u32 - 1));
@@ -813,18 +971,33 @@ impl Runtime {
     /// a lazy workaround to mutate runtime
     #[inline]
     pub(crate) fn to_mut(&self) -> &mut Self {
-        unsafe { (self as *const Self as *mut Self).as_mut().unwrap() }
+        unsafe { &mut *(self as *const Self as *mut Self) }
     }
 
     /// allocate object from the allocater
     #[inline]
     pub(crate) fn allocate_obj(&self) -> &'static mut JObjectInner {
-        unsafe { self.to_mut().object_allocator.allocate() }
+        let inner = unsafe { self.to_mut().object_allocator.allocate(self.weak_ref.as_ref().unwrap().upgrade().unwrap()) };
+        inner.__proto__ = None;
+        inner
+    }
+
+    pub fn create_object(&self) -> JObject {
+        let inner = self.allocate_obj();
+        inner.__proto__ = Some(self.prototypes.object);
+        return inner.into()
     }
 
     #[inline]
-    pub(crate) fn allocate_string(&self, size: usize) -> *mut u8 {
-        self.to_mut().string_allocator.allocate(size) as *mut u8
+    pub(crate) fn allocate_string(&self, s: &str) -> JSString {
+        if s.len() == 0 {
+            return JSString(std::ptr::null_mut());
+        }
+        self.to_mut().string_allocator.allocate(s)
+    }
+
+    pub fn allocate_bigint(&self) -> &'static mut JSBigInt {
+        self.to_mut().bigint_allocator.alloc()
     }
 
     #[inline]
@@ -832,32 +1005,30 @@ impl Runtime {
         if let Some(v) = &self.dynamic_var_suffix {
             self.to_mut()
                 .dynamic_var_names
-                .get_or_intern(format!("{}{}", name, v))
-                .to_usize() as u32
+                .write()
+                .get_or_intern(format!("{}{}", name, v)) as u32
         } else {
-            self.to_mut()
-                .dynamic_var_names
-                .get_or_intern(name)
-                .to_usize() as u32
+            self.to_mut().dynamic_var_names.write().get_or_intern(name) as u32
         }
     }
 
-    pub(crate) fn get_dynamic_var_name(&self, id: u32) -> &str {
-        self.dynamic_var_names
-            .resolve(string_interner::symbol::SymbolU32::try_from_usize(id as usize).unwrap())
-            .unwrap()
+    pub(crate) fn get_dynamic_var_name<'a>(&'a self, id: u32) -> &'a str {
+        let guard = self.dynamic_var_names.read();
+        let s = guard.resolve(id as usize).unwrap();
+        unsafe { std::mem::transmute_copy(&s) }
     }
 
     #[inline]
     pub fn register_field_name(&self, name: &str) -> u32 {
-        self.to_mut().obj_field_names.get_or_intern(name).to_usize() as u32
+        self.obj_field_names.write().get_or_intern(name) as u32
     }
 
     #[inline]
-    pub fn get_field_name(&self, id: u32) -> &str {
-        self.obj_field_names
-            .resolve(DefaultSymbol::try_from_usize(id as usize).unwrap())
-            .unwrap()
+    pub fn get_field_name<'a>(&'a self, id: u32) -> &'a str {
+        let guard = self.obj_field_names.read();
+        let s = guard.resolve(id as usize).unwrap();
+
+        unsafe { std::mem::transmute_copy(&s) }
     }
 
     #[inline]
@@ -876,31 +1047,79 @@ impl Runtime {
     //          async
     //////////////////////////////////////////////////////////////////
 
-    #[inline]
-    pub fn call_async<F>(&mut self, f: F) -> bultins::promise::Promise
+    pub fn run_async<F>(&mut self, future: F) -> bultins::promise::Promise
     where
-        F: Fn() -> Result<JValue, JValue> + 'static,
+        F: Future<Output = Result<JValue, JValue>> + 'static,
     {
-        let id = self.async_executor.run(f, true);
+        self.futures.push(Box::pin(future));
+        bultins::promise::Promise::Pending {
+            id: AsyncId(self.futures.len() - 1),
+        }
+    }
 
-        bultins::promise::Promise::Pending { id: id }
+    pub fn get_future<'a>(
+        &'a mut self,
+        id: AsyncId,
+    ) -> Pin<&'a mut dyn Future<Output = Result<JValue, JValue>>> {
+        self.futures.get_mut(id.0 as usize).unwrap().as_mut()
     }
 
     #[inline]
-    pub fn poll_async(&mut self, id: AsyncId, input: JValue) -> AsyncResult<JValue> {
-        self.async_executor.poll_result(id, input)
+    pub fn poll_async(&mut self, id: AsyncId) -> std::task::Poll<Result<JValue, JValue>> {
+        let f = self.get_future(id);
+        let handle = tokio::runtime::Handle::current();
+        let p = handle.block_on(async { futures::poll!(f) });
+        return p;
     }
 
     #[inline]
-    pub fn finish_async(&mut self) {
-        self.async_executor.finish_all(JValue::UNDEFINED);
+    pub fn finish_async(self: Arc<Self>) {
+        if self.futures.len() > 0 {
+            self.worker_task_sender
+                .clone()
+                .send(Box::new(move || {
+                    self.clone().attach();
+                    futures::executor::block_on(async {
+                        let mut i = 0;
+                        for f in &mut self.to_mut().futures {
+                            let p = futures::poll!(f.as_mut());
+                            if p.is_ready() {
+                                i += 1;
+                            };
+                            if i >= self.futures.len() {
+                                break;
+                            }
+                        }
+                    })
+                }))
+                .expect("failed to spawn task on worker thread");
+        }
     }
 
     #[inline]
-    pub fn get_async_stack(&mut self, stack_size: usize) -> &mut [JValue] {
-        let stack = &mut self.async_stack[self.aync_stack_offset..];
-        self.aync_stack_offset += stack_size;
-        return stack;
+    pub fn get_async_stack(&mut self, stack_size: usize) -> &'static mut [JValue] {
+        let size = stack_size / JValue::SIZE;
+        let data =
+            unsafe { std::alloc::alloc(std::alloc::Layout::array::<u8>(stack_size).unwrap()) }
+                as *mut _;
+        self.async_stacks
+            .push(unsafe { std::slice::from_raw_parts(data, size) });
+        return unsafe { std::slice::from_raw_parts_mut(data, size) };
+    }
+
+    pub fn drop_async_stack(&self, stack: &mut [JValue]) {
+        let re = self
+            .async_stacks
+            .binary_search_by(|s| stack.as_ptr().cmp(&s.as_ptr()));
+        if let Ok(idx) = re {
+            self.to_mut().async_stacks.remove(idx);
+            unsafe {
+                std::alloc::dealloc(
+                    stack.as_mut_ptr() as *mut u8,
+                    Layout::array::<JValue>(stack.len()).unwrap(),
+                )
+            };
+        }
     }
 
     //////////////////////////////////////////////////////////////////
@@ -937,13 +1156,62 @@ impl Runtime {
         self.functions[id.0 as usize].clone()
     }
 
+    pub fn create_constructor<F>(&self, func: F, name: &str, prototype: JObject) -> JObject
+    where
+        F: Fn(JSContext, JValue, &[JValue]) -> Result<JValue, JValue> + 'static,
+    {
+        let f = Arc::new(RwLock::new(func));
+
+        let inner = self.allocate_obj();
+        inner.__proto__ = Some(self.prototypes.function);
+
+        let obj = JObject { inner };
+        obj.set_inner(bultins::object::JObjectValue::NativeFunction(f));
+        obj.insert_property(
+            NAMES["prototype"],
+            prototype.into(),
+            bultins::flag::PropFlag::NONE,
+        );
+        obj.insert_property(
+            NAMES["length"],
+            JValue::create_number(0.0),
+            bultins::flag::PropFlag::CONFIGURABLE,
+        );
+        obj.insert_property(
+            NAMES["name"],
+            JValue::create_string(name.into()),
+            bultins::flag::PropFlag::CONFIGURABLE,
+        );
+        JObject { inner: inner }
+    }
+
     #[inline]
     pub fn create_native_function<F>(&self, func: F) -> JObject
     where
-        F: Fn(&JSFuncContext, JValue, &[JValue]) -> Result<JValue, JValue> + 'static,
+        F: Fn(JSContext, JValue, &[JValue]) -> Result<JValue, JValue> + 'static,
     {
-        let f: Arc<JSFunction> = Arc::new(JSFunction::Native(Arc::new(func)));
-        let obj = f.create_instance(None).create_object();
+        let f = Arc::new(RwLock::new(func));
+
+        let prototype = self.create_object();
+        let obj = self.create_object();
+
+        obj.set_inner(bultins::object::JObjectValue::NativeFunction(f));
+        obj.insert_property_builtin(NAMES["__proto__"], self.prototypes.function.into());
+        obj.insert_property(
+            NAMES["prototype"],
+            prototype.into(),
+            bultins::flag::PropFlag::NONE,
+        );
+        obj.insert_property(
+            NAMES["length"],
+            JValue::create_number(0.0),
+            bultins::flag::PropFlag::CONFIGURABLE,
+        );
+        obj.insert_property(
+            NAMES["name"],
+            JValue::create_static_string(""),
+            bultins::flag::PropFlag::CONFIGURABLE,
+        );
         obj
     }
 
@@ -1086,7 +1354,13 @@ impl Runtime {
     #[inline]
     pub fn declare_variable(&self, name: &str, value: JValue) {
         let id = self.to_mut().regester_dynamic_var_name(name);
-        self.declare_variable_static(id, value)
+        self.declare_variable_static(id, value);
+    }
+
+    #[inline]
+    pub fn declare_let_variable(&self, name: &str, value: JValue) {
+        let id = self.to_mut().regester_dynamic_var_name(name);
+        self.declare_let_variable_static(id, value)
     }
 
     #[inline]
@@ -1094,8 +1368,14 @@ impl Runtime {
         self.to_mut().variables.insert(id, Variable::Var(value));
     }
 
+    #[inline]
+    pub(crate) fn declare_let_variable_static(&self, id: u32, value: JValue) {
+        self.to_mut().variables.insert(id, Variable::Var(value));
+    }
+
     pub fn declare_constant(&self, name: &str, value: JValue) {
         let id = self.to_mut().regester_dynamic_var_name(name);
+
         self.to_mut().variables.insert(id, Variable::Const(value));
     }
 
@@ -1115,7 +1395,7 @@ impl Runtime {
     pub fn register_regex(&mut self, reg: &str, flags: &str) -> Result<RegexID, String> {
         match bultins::regex::RegExp::with_flags(reg, flags) {
             Ok(v) => {
-                self.regexs.push(Arc::new(v));
+                self.regexs.push(Box::new(v));
             }
             Err(e) => return Err(e.to_string()),
         }
@@ -1123,8 +1403,12 @@ impl Runtime {
         Ok(RegexID(self.regexs.len() as u32 - 1))
     }
 
-    #[inline]
-    pub fn get_regex(&self, id: RegexID) -> Arc<bultins::regex::RegExp> {
+    // runtime must be attached before calling this function
+    pub unsafe fn get_regex_object(&self, id: RegexID) -> JObject {
+        JObject::with_regex(self.get_regex(id))
+    }
+
+    pub(crate) fn get_regex(&self, id: RegexID) -> Box<bultins::regex::RegExp> {
         let s = self.regexs.get(id.0 as usize).unwrap();
         s.clone()
     }
@@ -1134,19 +1418,17 @@ impl Runtime {
         StringID(self.strings.get_or_intern(string) as u32)
     }
 
-    #[inline]
     pub fn get_string(&self, id: StringID) -> &'static str {
         let r = self.strings.resolve(id.0 as usize).unwrap();
         unsafe { std::mem::transmute_copy(&r) }
     }
 
-    #[inline]
     pub fn global_this(&self) -> &JObject {
         &self.global_this
     }
 
     #[inline]
-    pub fn get_variable(&self, key: u32) -> (JValue, bool) {
+    pub fn get_variable(&self, key: u32) -> Result<JValue, JValue> {
         if let Some(v) = self.variables.get(&key) {
             let v = match v {
                 Variable::Const(v) => *v,
@@ -1158,26 +1440,25 @@ impl Runtime {
                 Variable::ImportDefault(id) => self.modules[id.0 as usize].default_export,
                 Variable::ImportModule { id } => self.get_module_objet(*id).into(),
             };
-            return (v, false);
+            return Ok(v);
         } else {
-            let key = self
-                .dynamic_var_names
-                .resolve(DefaultSymbol::try_from_usize(key as usize).unwrap())
-                .unwrap();
+            let guard = self.dynamic_var_names.read();
+            let key = guard.resolve(key as usize).unwrap();
 
             if self.strict_mode {
-                return (
-                    JValue::Error(crate::error::Error::ReferenceError(format!(
-                        "{} is not defined",
-                        key
-                    ))),
-                    true,
-                );
+                return Err(JValue::from(crate::error::Error::ReferenceError(format!(
+                    "{} is not defined",
+                    key
+                ))));
             };
 
-            self.global_this
-                .inner
-                .get_property(key, std::ptr::null_mut())
+            self.global_this.get_property(
+                key,
+                JSContext {
+                    stack: (&self.stack[self.stack.len() / 2..]).as_ptr() as *mut JValue,
+                    runtime: &self,
+                },
+            )
         }
     }
 
@@ -1185,27 +1466,18 @@ impl Runtime {
         if let Some(m) = self.modules.get(module_id.0 as usize) {
             if let Some(v) = m.exports.get(&key) {
                 match v {
-                    ExportVariable::Const(c) => {
-                        let (v, err) = self.get_variable(*c);
-                        if err {
-                            return None;
-                        }
-                        return Some(v);
-                    }
-                    ExportVariable::Let(c) => {
-                        let (v, err) = self.get_variable(*c);
-                        if err {
-                            return None;
-                        }
-                        return Some(v);
-                    }
-                    ExportVariable::Var(c) => {
-                        let (v, err) = self.get_variable(*c);
-                        if err {
-                            return None;
-                        }
-                        return Some(v);
-                    }
+                    ExportVariable::Const(c) => match self.get_variable(*c) {
+                        Ok(v) => return Some(v),
+                        Err(_e) => return None,
+                    },
+                    ExportVariable::Let(c) => match self.get_variable(*c) {
+                        Ok(v) => return Some(v),
+                        Err(_e) => return None,
+                    },
+                    ExportVariable::Var(c) => match self.get_variable(*c) {
+                        Ok(v) => return Some(v),
+                        Err(_e) => return None,
+                    },
                     ExportVariable::Import { id, original_name } => {
                         return self.get_exported(*id, *original_name);
                     }
@@ -1227,22 +1499,31 @@ impl Runtime {
     }
 
     pub(crate) fn get_module_objet(&self, module_id: ModuleId) -> JObject {
-        todo!()
+        JObject::with_module(module_id)
     }
 
     #[inline]
-    pub fn set_variable(&mut self, key: u32, value: JValue) {
-        if self.variables.contains_key(&key) {
-            self.variables.insert(key, Variable::Var(value));
+    pub fn set_variable(&mut self, key: u32, value: JValue) -> Result<(), JValue> {
+        if let Some(v) = self.variables.get_mut(&key) {
+            match v {
+                Variable::Const(_v) => {}
+                Variable::Let(v) => *v = value,
+                Variable::Var(v) => *v = value,
+                _ => {}
+            };
+            Ok(())
         } else {
-            let key = self
-                .dynamic_var_names
-                .resolve(DefaultSymbol::try_from_usize(key as usize).unwrap())
-                .unwrap();
-            self.global_this
-                .inner
-                .to_mut()
-                .set_property(key, value, std::ptr::null_mut());
+            let guard = self.dynamic_var_names.read();
+            let key = guard.resolve(key as usize).unwrap();
+
+            self.global_this.set_property(
+                key,
+                value,
+                JSContext {
+                    stack: self.operational_stack.as_mut_ptr(),
+                    runtime: self,
+                },
+            )
         }
     }
 
@@ -1251,20 +1532,10 @@ impl Runtime {
     //////////////////////////////////////////////////////////////
 
     #[inline]
-    pub unsafe fn run_gc(&mut self) {
+    pub unsafe fn run_gc(self: Arc<Self>) {
         // scan root and stack
-        self.finalize_registry
-            .iter()
-            .for_each(|(_key, (func, objects))| {
-                func.trace();
-                for (obj, held_value) in objects {
-                    if obj.inner.flag == GcFlag::Garbage {
-                        continue;
-                    }
-                    obj.inner.to_mut().flag = GcFlag::Finalize;
-                    held_value.trace();
-                }
-            });
+        self.finalize_registry.trace();
+
         self.constants.iter().for_each(|v| v.trace());
         self.global.trace();
         self.global_this.trace();
@@ -1272,46 +1543,43 @@ impl Runtime {
         self.new_target.trace();
 
         self.user_owned.keys().into_iter().for_each(|v| v.trace());
-        self.variables.keys().for_each(|key| {
-            self.get_variable(*key).0.trace();
-        });
-        self.stack.iter().for_each(|v| v.trace());
-        self.async_stack.iter().for_each(|v| v.trace());
 
-        self.modules.iter().for_each(|v| v.default_export.trace());
-
-        let rt = self as *mut Runtime;
-
-        for (_key, (func, objects)) in &mut self.finalize_registry {
-            let mut stack = Vec::with_capacity(128);
-            for (obj, held_value) in objects.iter_mut() {
-                if obj.inner.flag == GcFlag::Finalize {
-                    stack.resize(1, *held_value);
-                    (*func).call(
-                        rt.as_ref().unwrap(),
-                        self.global.into(),
-                        stack.as_mut_ptr(),
-                        1,
-                    );
-
-                    obj.inner.to_mut().flag = GcFlag::NotUsed;
-                    // todo: clean up registry
-                }
-            }
+        for i in 0..self.variables.len() {
+            match self.get_variable(i as u32) {
+                Ok(v) => v.trace(),
+                Err(e) => e.trace(),
+            };
         }
+        self.stack.iter().for_each(|v| v.trace());
+        self.async_stacks
+            .iter()
+            .for_each(|v| v.iter().for_each(|v| v.trace()));
 
-        self.garbage_collect_signal.send(()).unwrap();
+        self.modules.iter().for_each(|v| {
+            v.default_export.trace();
+        });
+
+        self.to_mut().finalize_registry.garbage_collect(&self);
+
+        let rt = self.clone();
+
+        self.worker_task_sender
+            .send(Box::new(move || {
+                rt.to_mut().string_allocator.garbage_collect();
+                rt.to_mut().object_allocator.garbage_collect();
+                rt.to_mut().bigint_allocator.garbage_collect();
+                rt.to_mut().clean_functions();
+            }))
+            .unwrap();
     }
 
     /// return the reference counter
     #[inline]
-    pub fn user_own_value(&self, v: JValue) -> *mut AtomicUsize {
+    pub fn user_own_value(&self, v: JValue) {
         if let Some(count) = self.to_mut().user_owned.get_mut(&v) {
             count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            return count as *mut AtomicUsize;
         } else {
-            self.to_mut().user_owned.insert(v, AtomicUsize::new(0));
-            self.user_owned.get(&v).unwrap() as *const AtomicUsize as *mut AtomicUsize
+            self.to_mut().user_owned.insert(v, AtomicUsize::new(1));
         }
     }
 
@@ -1319,9 +1587,15 @@ impl Runtime {
     pub fn user_drop_value(&self, v: JValue) {
         if let Some(count) = self.to_mut().user_owned.get_mut(&v) {
             let c = count.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
-            if c >= 1 {
+            if c <= 1 {
                 self.to_mut().user_owned.remove(&v);
             }
         }
+    }
+}
+
+impl Drop for Runtime{
+    fn drop(&mut self) {
+        println!("runtime dropped")
     }
 }

@@ -1,74 +1,75 @@
-
 // | capacity | length | T...
 /// a Vec that has a size of pointer type
 pub struct PointerVec<T>(*mut T);
 
-
-impl<T> PointerVec<T>{
-    pub const fn new() -> Self{
+impl<T> PointerVec<T> {
+    pub const fn new() -> Self {
         Self(0 as _)
     }
 
-    pub fn with_capacity(capacity: usize) -> Self{
-        unsafe{
-            let ptr = std::alloc::alloc(std::alloc::Layout::array::<u8>(std::mem::size_of::<[usize;2]>() + std::mem::size_of::<T>()*capacity).unwrap()) as *mut usize;
+    pub fn with_capacity(capacity: usize) -> Self {
+        unsafe {
+            let ptr = std::alloc::alloc(
+                std::alloc::Layout::array::<u8>(
+                    std::mem::size_of::<[usize; 2]>() + std::mem::size_of::<T>() * capacity,
+                )
+                .unwrap(),
+            ) as *mut usize;
             *ptr = capacity;
             *ptr.add(1) = 0;
             Self(ptr.add(2) as *mut T)
         }
     }
 
-    pub fn len(&self) -> usize{
-        if self.0.is_null(){
-            return 0
+    pub fn len(&self) -> usize {
+        if self.0.is_null() {
+            return 0;
         }
 
-        unsafe{*(self.0 as *mut usize).sub(1)}
+        unsafe { *(self.0 as *mut usize).sub(1) }
     }
 
-    pub fn capacity(&self) -> usize{
-        if self.0.is_null(){
-            return 0
+    pub fn capacity(&self) -> usize {
+        if self.0.is_null() {
+            return 0;
         }
 
-        unsafe{*(self.0 as *mut usize).sub(2)}
+        unsafe { *(self.0 as *mut usize).sub(2) }
     }
 
     pub fn reserve(&mut self, additional: usize) {
-        if usize::MAX - additional > self.len(){
+        if usize::MAX - additional > self.len() {
             panic!("new capacity cannot exceed usize::Max")
         }
-        while (self.capacity() - self.len()) < additional{
+        while (self.capacity() - self.len()) < additional {
             self.realloc();
         }
     }
 
-    pub fn reserve_exact(&mut self, additional: usize){
-        if usize::MAX - additional > self.len(){
+    pub fn reserve_exact(&mut self, additional: usize) {
+        if usize::MAX - additional > self.len() {
             panic!("new capacity cannot exceed usize::Max")
         }
         self.reserve(additional)
     }
 
-    pub fn try_reserve(&mut self, additional: usize) -> Result<(), ()>{
-        if usize::MAX - additional > self.len(){
-            return Err(())
+    pub fn try_reserve(&mut self, additional: usize) -> Result<(), ()> {
+        if usize::MAX - additional > self.len() {
+            return Err(());
         }
         self.reserve(additional);
-        return Ok(())
+        return Ok(());
     }
 
-    pub fn try_reserve_exact(&mut self, additional: usize) -> Result<(), ()>{
-        if usize::MAX - additional > self.len(){
-            return Err(())
+    pub fn try_reserve_exact(&mut self, additional: usize) -> Result<(), ()> {
+        if usize::MAX - additional > self.len() {
+            return Err(());
         }
         self.reserve_exact(additional);
-        return Ok(())
+        return Ok(());
     }
 
-    pub fn shrink_to_fit(&mut self){
-
-    }
+    pub fn shrink_to_fit(&mut self) {}
 
     pub fn shrink_to(&mut self, min_capacity: usize) {
         if self.capacity() > min_capacity {
@@ -111,15 +112,15 @@ impl<T> PointerVec<T>{
         self
     }
 
-    pub fn as_mut_slice(&mut self) -> &mut [T]{
+    pub fn as_mut_slice(&mut self) -> &mut [T] {
         self
     }
 
     pub fn as_ptr(&self) -> *const T {
         // We shadow the slice method of the same name to avoid going through
         // `deref`, which creates an intermediate reference.
-        if self.0.is_null(){
-            return core::ptr::NonNull::dangling().as_ptr()
+        if self.0.is_null() {
+            return core::ptr::NonNull::dangling().as_ptr();
         }
         self.0
     }
@@ -127,8 +128,8 @@ impl<T> PointerVec<T>{
     pub fn as_mut_ptr(&self) -> *mut T {
         // We shadow the slice method of the same name to avoid going through
         // `deref`, which creates an intermediate reference.
-        if self.0.is_null(){
-            return core::ptr::NonNull::dangling().as_ptr()
+        if self.0.is_null() {
+            return core::ptr::NonNull::dangling().as_ptr();
         }
         self.0
     }
@@ -266,7 +267,9 @@ impl<T> PointerVec<T>{
                     unsafe {
                         core::ptr::copy(
                             self.v.as_ptr().add(self.processed_len),
-                            self.v.as_mut_ptr().add(self.processed_len - self.deleted_cnt),
+                            self.v
+                                .as_mut_ptr()
+                                .add(self.processed_len - self.deleted_cnt),
                             self.original_len - self.processed_len,
                         );
                     }
@@ -278,7 +281,12 @@ impl<T> PointerVec<T>{
             }
         }
 
-        let mut g = BackshiftOnDrop { v: self, processed_len: 0, deleted_cnt: 0, original_len };
+        let mut g = BackshiftOnDrop {
+            v: self,
+            processed_len: 0,
+            deleted_cnt: 0,
+            original_len,
+        };
 
         fn process_loop<F, T, const DELETED: bool>(
             original_len: usize,
@@ -388,7 +396,11 @@ impl<T> PointerVec<T>{
             }
         }
 
-        let mut gap = FillGapOnDrop { read: 1, write: 1, vec: self };
+        let mut gap = FillGapOnDrop {
+            read: 1,
+            write: 1,
+            vec: self,
+        };
         let ptr = gap.vec.as_mut_ptr();
 
         /* Drop items while going through Vec, it should be more efficient than
@@ -428,33 +440,40 @@ impl<T> PointerVec<T>{
         }
     }
 
-
-    fn realloc(&mut self){
-        unsafe{
-            if self.0.is_null(){
-                let ptr = std::alloc::alloc(std::alloc::Layout::array::<u8>(std::mem::size_of::<[usize;2]>() + std::mem::size_of::<T>()*24).unwrap()) as *mut usize;
+    fn realloc(&mut self) {
+        unsafe {
+            if self.0.is_null() {
+                let ptr = std::alloc::alloc(
+                    std::alloc::Layout::array::<u8>(
+                        std::mem::size_of::<[usize; 2]>() + std::mem::size_of::<T>() * 24,
+                    )
+                    .unwrap(),
+                ) as *mut usize;
                 *ptr = 24;
                 *ptr.add(1) = 0;
                 self.0 = ptr.add(2) as *mut T;
-            } else{
+            } else {
                 let l = self.len();
                 let cap = self.capacity();
-                let ptr = std::alloc::alloc(std::alloc::Layout::array::<u8>(
-                    std::mem::size_of::<[usize;2]>() + std::mem::size_of::<T>()*cap*2).unwrap()) as *mut usize;
-                *ptr = cap*2;
+                let ptr = std::alloc::alloc(
+                    std::alloc::Layout::array::<u8>(
+                        std::mem::size_of::<[usize; 2]>() + std::mem::size_of::<T>() * cap * 2,
+                    )
+                    .unwrap(),
+                ) as *mut usize;
+                *ptr = cap * 2;
                 *ptr.add(1) = l;
                 self.0 = ptr.add(2) as *mut T;
             }
         }
-        
     }
 
-    pub fn push(&mut self, value:T){
+    pub fn push(&mut self, value: T) {
         let l = self.len();
-        if l == self.capacity(){
+        if l == self.capacity() {
             self.realloc();
         }
-        unsafe{*(self.0.add(l)) = value};
+        unsafe { *(self.0.add(l)) = value };
     }
 
     pub fn pop(&mut self) -> Option<T> {
@@ -463,7 +482,7 @@ impl<T> PointerVec<T>{
             None
         } else {
             unsafe {
-                self.set_len(l-1);
+                self.set_len(l - 1);
                 Some(core::ptr::read(self.as_ptr().add(self.len())))
             }
         }
@@ -477,10 +496,10 @@ impl<T> PointerVec<T>{
     }
 
     unsafe fn append_elements(&mut self, other: *const [T]) {
-        let count = (*other).len() ;
+        let count = (*other).len();
         self.reserve(count);
         let len = self.len();
-        core::ptr::copy_nonoverlapping(other as *const T, self.as_mut_ptr().add(len), count) ;
+        core::ptr::copy_nonoverlapping(other as *const T, self.as_mut_ptr().add(len), count);
         self.set_len(len + count);
     }
 
@@ -500,23 +519,23 @@ impl<T> PointerVec<T>{
         //
         let len = self.len();
         let bounds = ..len;
-        let (start, end ) = {
+        let (start, end) = {
             let len = bounds.end;
 
             let start: std::ops::Bound<&usize> = range.start_bound();
             let start = match start {
                 std::ops::Bound::Included(&start) => start,
-                std::ops::Bound::Excluded(start) => {
-                    start.checked_add(1).unwrap_or_else(|| panic!("attempted to index slice from after maximum usize"))
-                }
+                std::ops::Bound::Excluded(start) => start
+                    .checked_add(1)
+                    .unwrap_or_else(|| panic!("attempted to index slice from after maximum usize")),
                 std::ops::Bound::Unbounded => 0,
             };
 
             let end: std::ops::Bound<&usize> = range.end_bound();
             let end = match end {
-                std::ops::Bound::Included(end) => {
-                    end.checked_add(1).unwrap_or_else(|| panic!("attempted to index slice up to maximum usize"))
-                },
+                std::ops::Bound::Included(end) => end
+                    .checked_add(1)
+                    .unwrap_or_else(|| panic!("attempted to index slice up to maximum usize")),
                 std::ops::Bound::Excluded(&end) => end,
                 std::ops::Bound::Unbounded => len,
             };
@@ -536,7 +555,8 @@ impl<T> PointerVec<T>{
             self.set_len(start);
             // Use the borrow in the IterMut to indicate borrowing behavior of the
             // whole Drain iterator (like &mut T).
-            let range_slice = std::slice::from_raw_parts_mut(self.as_mut_ptr().add(start), end - start);
+            let range_slice =
+                std::slice::from_raw_parts_mut(self.as_mut_ptr().add(start), end - start);
             todo!()
         }
     }
@@ -560,8 +580,7 @@ impl<T> PointerVec<T>{
         self.len() == 0
     }
 
-    pub fn split_off(&mut self, at: usize) -> Self
-    {
+    pub fn split_off(&mut self, at: usize) -> Self {
         #[cold]
         #[inline(never)]
         fn assert_failed(at: usize, len: usize) -> ! {
@@ -574,10 +593,7 @@ impl<T> PointerVec<T>{
 
         if at == 0 {
             // the new vector can take over the original buffer and avoid the copy
-            return std::mem::replace(
-                self,
-                Self::with_capacity(self.capacity()),
-            );
+            return std::mem::replace(self, Self::with_capacity(self.capacity()));
         }
 
         let other_len = self.len() - at;
@@ -601,7 +617,7 @@ impl<T> PointerVec<T>{
         if new_len > len {
             let l = new_len - len;
             self.reserve(l);
-            for _ in 0..l{
+            for _ in 0..l {
                 self.push((f)());
             }
         } else {
@@ -609,8 +625,7 @@ impl<T> PointerVec<T>{
         }
     }
 
-    pub fn leak<'a>(self) -> &'a mut [T]
-    {
+    pub fn leak<'a>(self) -> &'a mut [T] {
         let me = std::mem::ManuallyDrop::new(self);
         unsafe { std::slice::from_raw_parts_mut(me.as_mut_ptr(), me.len()) }
     }
@@ -642,7 +657,7 @@ impl<T> PointerVec<T>{
         // - `ptr` is guaranteed to be valid for `self.len` elements
         // - but the allocation extends out to `self.buf.capacity()` elements, possibly
         // uninitialized
-        let spare_ptr = ptr.add(self.len()) ;
+        let spare_ptr = ptr.add(self.len());
         let spare_ptr = spare_ptr.cast::<std::mem::MaybeUninit<T>>();
         let spare_len = self.capacity() - self.len();
 
@@ -652,73 +667,73 @@ impl<T> PointerVec<T>{
         let initialized = std::slice::from_raw_parts_mut(ptr, self.len());
         let spare = std::slice::from_raw_parts_mut(spare_ptr, spare_len);
 
-        (initialized, spare, (self.0 as *mut usize).sub(1).as_mut().unwrap())
-        
+        (initialized, spare, &mut *(self.0 as *mut usize).sub(1))
     }
-
-    
 }
 
-impl<T:Clone> PointerVec<T>{
-    pub fn resize(&mut self, new_len: usize, value: T){
+impl<T: Clone> PointerVec<T> {
+    pub fn resize(&mut self, new_len: usize, value: T) {
         let len = self.len();
 
         if new_len > len {
             let l = new_len - len;
             self.reserve(l);
-            unsafe{
+            unsafe {
                 let p = self.as_mut_ptr().add(len);
-                for i in 0..l{
+                for i in 0..l {
                     p.add(i).write(value.clone())
                 }
                 self.set_len(new_len);
             }
-            
         } else {
             self.truncate(new_len);
         }
     }
 
-    pub fn extend_from_slice(&mut self, other: &[T]){
+    pub fn extend_from_slice(&mut self, other: &[T]) {
         self.reserve(other.len());
-        unsafe{
+        unsafe {
             let l = self.len();
             let mut i = 0;
-            for v in other{
+            for v in other {
                 self.0.add(l).add(i).write(v.clone());
                 i += 1;
             }
-            self.set_len(l+other.len())
+            self.set_len(l + other.len())
         }
-        
     }
 
     pub fn extend_from_within<R>(&mut self, src: R)
     where
-        R: std::ops::RangeBounds<usize>
+        R: std::ops::RangeBounds<usize>,
     {
-        let start = match src.start_bound(){
+        let start = match src.start_bound() {
             std::ops::Bound::Excluded(v) => *v,
             std::ops::Bound::Included(v) => *v,
-            std::ops::Bound::Unbounded => 0
+            std::ops::Bound::Unbounded => 0,
         };
-        let end = match src.end_bound(){
+        let end = match src.end_bound() {
             std::ops::Bound::Excluded(v) => *v,
-            std::ops::Bound::Included(v) => *v +1,
-            std::ops::Bound::Unbounded => self.len()
+            std::ops::Bound::Included(v) => *v + 1,
+            std::ops::Bound::Unbounded => self.len(),
         };
-        let s = unsafe{std::slice::from_raw_parts(self.0, self.len())};
+        let s = unsafe { std::slice::from_raw_parts(self.0, self.len()) };
         self.extend_from_slice(&s[start..end]);
     }
 }
 
-impl<T> Drop for PointerVec<T>{
+impl<T> Drop for PointerVec<T> {
     fn drop(&mut self) {
-        unsafe{
+        unsafe {
             let s = self.as_mut_slice() as *mut [T];
             std::ptr::drop_in_place(s);
-            std::alloc::dealloc(self.0 as *mut u8, 
-                std::alloc::Layout::array::<u8>(std::mem::size_of::<[usize;2]>() + std::mem::size_of::<T>()*self.capacity()).unwrap());
+            std::alloc::dealloc(
+                self.0 as *mut u8,
+                std::alloc::Layout::array::<u8>(
+                    std::mem::size_of::<[usize; 2]>() + std::mem::size_of::<T>() * self.capacity(),
+                )
+                .unwrap(),
+            );
         }
     }
 }
@@ -732,7 +747,6 @@ impl<T> std::ops::Deref for PointerVec<T> {
 }
 
 impl<T> std::ops::DerefMut for PointerVec<T> {
-
     fn deref_mut(&mut self) -> &mut Self::Target {
         unsafe { std::slice::from_raw_parts_mut(self.as_mut_ptr(), self.len()) }
     }
@@ -742,13 +756,13 @@ impl<T: Clone> Clone for PointerVec<T> {
     fn clone(&self) -> Self {
         let mut a = Self::new();
         a.reserve(self.capacity());
-        unsafe{
-            for i in 0..self.len(){
+        unsafe {
+            for i in 0..self.len() {
                 a.0.add(i).write(self[i].clone());
-            };
+            }
             a.set_len(self.len());
         };
-        return a
+        return a;
     }
 }
 
@@ -775,18 +789,17 @@ impl<T, I: std::slice::SliceIndex<[T]>> std::ops::IndexMut<I> for PointerVec<T> 
     }
 }
 
-impl<A> std::iter::FromIterator<A> for PointerVec<A>{
+impl<A> std::iter::FromIterator<A> for PointerVec<A> {
     fn from_iter<T: IntoIterator<Item = A>>(iter: T) -> Self {
         let mut a = Self::new();
-        iter.into_iter().for_each(|v|{
+        iter.into_iter().for_each(|v| {
             a.push(v);
         });
         return a;
     }
 }
 
-
-impl<'a, T> IntoIterator for &'a PointerVec<T>{
+impl<'a, T> IntoIterator for &'a PointerVec<T> {
     type Item = &'a T;
     type IntoIter = std::slice::Iter<'a, T>;
     fn into_iter(self) -> Self::IntoIter {
@@ -794,7 +807,7 @@ impl<'a, T> IntoIterator for &'a PointerVec<T>{
     }
 }
 
-impl<'a, T> IntoIterator for &'a mut PointerVec<T>{
+impl<'a, T> IntoIterator for &'a mut PointerVec<T> {
     type Item = &'a mut T;
     type IntoIter = std::slice::IterMut<'a, T>;
     fn into_iter(self) -> Self::IntoIter {
@@ -802,15 +815,15 @@ impl<'a, T> IntoIterator for &'a mut PointerVec<T>{
     }
 }
 
-impl<T> IntoIterator for PointerVec<T>{
+impl<T> IntoIterator for PointerVec<T> {
     type IntoIter = Iter<T>;
     type Item = T;
 
     fn into_iter(self) -> Self::IntoIter {
-        let i = Iter{
-            v:self.0,
-            len:self.len(),
-            count:0
+        let i = Iter {
+            v: self.0,
+            len: self.len(),
+            count: 0,
         };
         // prevent drop of values
         std::mem::forget(self);
@@ -818,46 +831,46 @@ impl<T> IntoIterator for PointerVec<T>{
     }
 }
 
-pub struct Iter<T>{
-    v:*mut T,
-    len:usize,
-    count:usize
+pub struct Iter<T> {
+    v: *mut T,
+    len: usize,
+    count: usize,
 }
 
-impl<T> Iterator for Iter<T>{
+impl<T> Iterator for Iter<T> {
     type Item = T;
 
     fn count(self) -> usize
-        where
-            Self: Sized, {
-        return self.len - self.count
+    where
+        Self: Sized,
+    {
+        return self.len - self.count;
     }
 
-
     fn next(&mut self) -> Option<Self::Item> {
-        if self.count >= self.len{
-            return None
+        if self.count >= self.len {
+            return None;
         }
-        unsafe{
+        unsafe {
             let v = self.v.add(self.count).read();
             self.count += 1;
-            return Some(v)
+            return Some(v);
         }
     }
 
     fn nth(&mut self, n: usize) -> Option<Self::Item> {
-        if n >= self.len - self.count{
-            return None
+        if n >= self.len - self.count {
+            return None;
         }
 
-        return Some(unsafe{self.v.add(self.count + n).read()})
+        return Some(unsafe { self.v.add(self.count + n).read() });
     }
 }
 
-impl<T> Drop for Iter<T>{
+impl<T> Drop for Iter<T> {
     fn drop(&mut self) {
         let mut v = PointerVec(self.v);
-        unsafe{v.set_len(0)};
+        unsafe { v.set_len(0) };
         drop(v);
     }
 }

@@ -1,37 +1,68 @@
-use std::collections::HashMap;
+use std::sync::Arc;
 
+use futures::Future;
+use fxhash::FxHashMap;
 use likely_stable::likely;
 
+use crate::bultins::flag::PropFlag;
+use crate::bultins::function::CaptureStack;
 use crate::bultins::object::JObject;
-use crate::bultins::strings::JString;
-use crate::bytecodes::{Block, OpCode, Register, TempAllocValue};
-use crate::debug;
+use crate::bytecodes::{Block, OpCode, Register};
 use crate::error::Error;
-use crate::fast_iter::FastIterator;
-use crate::operations;
 use crate::runtime::Runtime;
 use crate::types::JValue;
+use crate::utils::iterator::JSIterator;
+use crate::utils::string_interner::NAMES;
+use crate::{operations, JSContext, Promise, PropKey, ToProperyKey};
+
+//use self::block_compiler::CompiledBlock;
+
+mod block_compiler;
+pub mod clousure;
+//pub mod clousure1;
+//pub use clousure1 as clousure;
 
 /// todo: use actual cpu registers to speed up operations
+#[repr(transparent)]
 struct Registers([JValue; 3]);
+
+impl Registers {
+    #[inline]
+    pub fn read(&self, reg: Register) -> JValue {
+        unsafe { *self.0.get_unchecked(reg.0 as usize) }
+    }
+
+    #[inline]
+    pub fn write(&self, reg: Register, value: JValue) {
+        unsafe {
+            std::ptr::write_volatile(
+                (self as *const Self as *mut JValue).add(reg.0 as usize),
+                value,
+            );
+        }
+    }
+}
 
 impl std::ops::Index<Register> for Registers {
     type Output = JValue;
     fn index(&self, index: Register) -> &Self::Output {
-        &self.0[index.0 as usize]
+        unsafe { self.0.get_unchecked(index.0 as usize) }
     }
 }
 
 impl std::ops::IndexMut<Register> for Registers {
     fn index_mut(&mut self, index: Register) -> &mut Self::Output {
-        &mut self.0[index.0 as usize]
+        unsafe { self.0.get_unchecked_mut(index.0 as usize) }
     }
 }
 
 pub enum Res {
     Ok,
-    Break(Block),
+    Await(JValue, Register),
+    Yield(JValue, Register),
+
     Return(JValue),
+
     Err(JValue),
 }
 
@@ -41,18 +72,33 @@ pub struct Interpreter<'a> {
     r: Registers,
 
     stack: &'a mut [JValue],
+    op_stack_offset: usize,
+    cap: Option<CaptureStack>,
     capture_stack: Option<&'a mut [JValue]>,
-    arg_len:usize,
 
-    blocks: HashMap<Block, usize, crate::utils::nohasher::NoHasherBuilder>,
-    need_jump: Option<Block>,
+    arg_offset_counter: i64,
+    arg_len: usize,
+
+    //clousure_blocks: Vec<Option<Box<dyn Fn(
+    //    &mut Interpreter,
+    //    JSContext,
+    //    &mut Registers,
+    //    &mut JValue,
+    //    &[JValue],
+    //    &mut [JValue],
+    //    &mut usize,
+    //) -> Result<Res, JValue>>>>,
+
+    blocks: Vec<Option<(u64, usize)>>,
+    compiled_blocks: FxHashMap<Block, block_compiler::CompiledBlock>,
+    call_sites: FxHashMap<usize, (JValue, usize)>,
 
     /// in a try statement
-    catch_block: Vec<Block>,
+    catch_block: Vec<(Block, u32)>,
 
     is_global: bool,
 
-    iterators: Vec<&'static mut FastIterator>,
+    iterators: Vec<JSIterator<'a>>,
     iter_done: bool,
 
     temps: Vec<JValue>,
@@ -61,15 +107,22 @@ pub struct Interpreter<'a> {
 
 impl<'a> Interpreter<'a> {
     #[inline]
-    pub fn global(runtime: &'a Runtime, stack: &'a mut [JValue]) -> Self {
+    pub fn global(runtime: &'a Runtime, stack: &'a mut [JValue], op_stack_offset: usize) -> Self {
         Self {
             runtime,
             r: Registers([JValue::UNDEFINED; 3]),
             stack: stack,
+            op_stack_offset: op_stack_offset,
+            cap: None,
             capture_stack: None,
-            arg_len:0,
+            arg_offset_counter: 0,
+            arg_len: 0,
+
             blocks: Default::default(),
-            need_jump: None,
+            compiled_blocks: Default::default(),
+
+            call_sites: Default::default(),
+            //need_jump: None,
             catch_block: Vec::new(),
 
             is_global: true,
@@ -85,17 +138,27 @@ impl<'a> Interpreter<'a> {
     pub fn function(
         runtime: &'a Runtime,
         stack: &'a mut [JValue],
-        capture_stack: &'a mut [JValue],
+        op_stack_offset: usize,
+        capture_stack: CaptureStack,
+        capture_stack_data: Option<&'a mut [JValue]>,
     ) -> Self {
         Self {
             runtime,
             r: Registers([JValue::UNDEFINED; 3]),
             stack: stack,
-            capture_stack: Some(capture_stack),
-            arg_len:0,
+            op_stack_offset,
+            cap: Some(capture_stack),
+            capture_stack: capture_stack_data,
+
+            arg_offset_counter: 0,
+            arg_len: 0,
 
             blocks: Default::default(),
-            need_jump: None,
+            compiled_blocks: Default::default(),
+
+            call_sites: Default::default(),
+
+            //need_jump: None,
             catch_block: Vec::new(),
 
             is_global: false,
@@ -108,8 +171,164 @@ impl<'a> Interpreter<'a> {
     }
 
     #[inline]
+    fn insert_block(&mut self, block: Block, index: usize) {
+        if let Some(b) = self.blocks.get_mut(block.0 as usize) {
+            if b.is_none() {
+                *b = Some((0, index));
+            }
+        } else {
+            self.blocks.resize(block.0 as usize + 2, None);
+            self.blocks[block.0 as usize] = Some((0, index))
+        }
+    }
+
+    #[inline]
+    fn compile_block(&mut self, block: Block, bytecodes: &[OpCode]) {
+        if self.is_global {
+            let start = self.blocks[block.0 as usize].unwrap().1 + 1;
+        }
+    }
+
+    #[inline]
     pub fn run(
         &mut self,
+        mut this: JValue,
+        args: &[JValue],
+        codes: &[OpCode],
+    ) -> Result<JValue, JValue> {
+
+        let mut i = 0;
+
+        loop {
+            if i == codes.len() {
+                break;
+            }
+            let code = codes[i];
+
+            //debug::debug!("run code {:#?}", code);
+            
+            let intpr:&mut Self = unsafe{std::mem::transmute_copy(&self)};
+
+            let re = self.run_code(&mut this, args, code, codes, &mut i);
+
+            match re {
+                Err(e) => {
+                    if let Some((_catch_block, line)) = self.catch_block.pop() {
+                        self.r[Register(0)] = e;
+
+                        i = line as usize;
+                    } else {
+                        return Err(e);
+                    }
+                }
+                Ok(re) => {
+                    match re {
+                        Res::Await(_, _) => {}
+                        Res::Yield(_, _) => {}
+                        Res::Ok => {}
+                        Res::Err(e) => {
+                            if let Some((_catch_block, line)) = self.catch_block.pop() {
+                                self.r[Register(0)] = e;
+
+                                i = line as usize;
+                            } else {
+                                return Err(e);
+                            }
+                        }
+                        Res::Return(r) => return Ok(r),
+                    }
+                }
+            }
+
+            i += 1;
+        }
+        Ok(JValue::UNDEFINED)
+    }
+
+    // consume self and create a future
+    pub fn run_async(
+        self,
+        mut this: JValue,
+        args: &[JValue],
+        codes: Arc<Vec<OpCode>>,
+    ) -> impl Future<Output = Result<JValue, JValue>> + 'static {
+        let args = args.to_vec();
+        let mut intpr: Interpreter<'static> = unsafe { std::mem::transmute(self) };
+
+        async move {
+            let mut i = 0;
+
+            loop {
+                if i == codes.len() {
+                    break;
+                }
+                let code = codes[i];
+
+                //debug::debug!("run code {:#?}", code);
+                let re = intpr.run_code(&mut this, &args, code, &codes, &mut i);
+
+                match re {
+                    Err(e) => {
+                        if let Some((catch_block, line)) = intpr.catch_block.pop() {
+                            intpr.r[Register(0)] = e;
+
+                            i = line as usize;
+                        } else {
+                            return Err(e);
+                        }
+                    }
+                    Ok(r) => {
+                        match r {
+                            Res::Await(f, result) => {
+                                if let Some(obj) = f.as_object() {
+                                    if let Some(p) = obj.as_promise() {
+                                        match p {
+                                            Promise::ForeverPending => {
+                                                return Err(
+                                                    Error::AwaitOnForeverPendingPromise.into()
+                                                )
+                                            }
+                                            Promise::Fulfilled(f) => {
+                                                intpr.r[result] = *f;
+                                            }
+                                            Promise::Pending { id } => {
+                                                let re =
+                                                    intpr.runtime.to_mut().get_future(*id).await;
+                                                match re {
+                                                    Ok(v) => {
+                                                        intpr.r[result] = v;
+                                                        *p = Promise::Fulfilled(v);
+                                                    }
+                                                    Err(e) => {
+                                                        *p = Promise::Rejected(e);
+                                                        return Err(e);
+                                                    }
+                                                };
+                                            }
+                                            Promise::Rejected(e) => return Err(*e),
+                                        }
+                                    };
+                                } else {
+                                    intpr.r[result] = f;
+                                };
+                            }
+                            Res::Yield(_, _) => {}
+                            // the outermost context should not be break
+                            Res::Ok => {}
+                            Res::Return(r) => return Ok(r),
+                            _ => {}
+                        }
+                    }
+                }
+
+                i += 1;
+            }
+            Ok(JValue::UNDEFINED)
+        }
+    }
+
+    pub fn run_async_generator(
+        mut self,
         mut this: JValue,
         args: &[JValue],
         codes: &[OpCode],
@@ -117,115 +336,31 @@ impl<'a> Interpreter<'a> {
         let mut i = 0;
 
         loop {
-            if i == codes.len(){
+            if i == codes.len() {
                 break;
             }
             let code = codes[i];
 
-            println!("run code {:#?}", code);
-            if self.need_jump.is_none() {
-                //debug::debug!("run code {:#?}", code);
+            //debug::debug!("run code {:#?}", code);
 
-                let mut re = Res::Ok;
+            let re = self.run_code(&mut this, args, code, codes, &mut i);
 
-                if let OpCode::Loop { body_start, body_len } = code{
-                    'outer:loop{
-                        let mut code_index = body_start as usize;
-    
-                        while code_index < body_start as usize + body_len as usize{
-                            let code = codes[code_index];
-        
-                            if self.need_jump.is_none() {
-                                
-                                //debug::debug!("run code {:#?}", code);
+            match re {
+                Err(e) => {
+                    if let Some((catch_block, line)) = self.catch_block.pop() {
+                        self.r[Register(0)] = e;
 
-                                let r = self.run_code(&mut this, args, code, &mut code_index);
-                
-                                match r {
-                                    Res::Err(_) |
-                                    Res::Return(_)=> {
-                                        i = code_index;
-                                        re = r;
-                                        break 'outer;
-                                    },
-                                    Res::Break(exit) => {
-                                        i = body_start as usize + body_len as usize;
-                                        self.need_jump = Some(exit);
-                                        break 'outer;
-                                    }
-                                    Res::Ok => {}
-                                }
-                            } else {
-                                //debug::debug!("need jump {:?}", self.need_jump.unwrap());
-                
-                                if let Some(b) = self.blocks.get(&self.need_jump.unwrap()) {
-                                    // block not in loop
-                                    let b = *b;
-                                    if b < body_start as usize || b >= body_start as usize + body_len as usize{
-                                        i = b;
-                                        self.need_jump = None;
-
-                                        re = Res::Ok;
-                                        break 'outer;
-                                    
-                                    } else{
-                                        // block in loop
-                                        code_index = b;
-                                        self.need_jump = None;
-                                    }
-                                    
-                
-                                } else if let OpCode::SwitchToBlock(b) = code {
-                                    self.blocks.insert(b, code_index);
-                
-                                    //debug::debug!("switch to block {:?}", b);
-                                    // jump resolved
-                                    if self.need_jump.unwrap() == b {
-                                        self.need_jump = None;
-                                    }
-                
-                                    // jump not resolved, loop until next switch to block
-                                }
-                            };
-                            code_index += 1;
-                        };
-                    };
-                } else{
-                    re = self.run_code(&mut this, args, code, &mut i);
-                };
-
-                match re {
-                    Res::Err(e) => {
-                        if self.catch_block.len() > 0 {
-                            self.r[Register(0)] = e;
-                            self.need_jump = Some(*self.catch_block.last().unwrap());
-                        } else {
-                            return Err(e);
-                        }
-                    },
-                    // the outermost context should not be break
-                    Res::Break(_) => {},
-                    Res::Ok => {}
-                    Res::Return(r) => return Ok(r),
-                }
-            } else {
-                //debug::debug!("need jump {:?}", self.need_jump.unwrap());
-
-                if let Some(b) = self.blocks.get(&self.need_jump.unwrap()) {
-                    // jump resolved
-                    i = *b;
-                    self.need_jump = None;
-
-                } else if let OpCode::SwitchToBlock(b) = code {
-                    self.blocks.insert(b, i);
-
-                    //debug::debug!("switch to block {:?}", b);
-                    // jump resolved
-                    if self.need_jump.unwrap() == b {
-                        self.need_jump = None;
+                        i = line as usize;
+                    } else {
+                        return Err(e);
                     }
-
-                    // jump not resolved, loop until next switch to block
+                }
+                Ok(re) => {
+                    match re {
+                        Res::Ok => {}
+                        Res::Return(r) => return Ok(r),
+                        _ => {}
+                    }
                 }
             }
 
@@ -240,78 +375,228 @@ impl<'a> Interpreter<'a> {
         this: &mut JValue,
         args: &[JValue],
         code: OpCode,
+        codes: &[OpCode],
         index: &mut usize,
-    ) -> Res {
+    ) -> Result<Res, JValue> {
+        let ctx = JSContext {
+            stack: (&mut self.stack[self.op_stack_offset..]).as_mut_ptr(),
+            runtime: self.runtime,
+        };
+
+        //println!("{:?}", code);
         match code {
             OpCode::NoOp => {}
-            OpCode::Debugger => {},
-            OpCode::Loop { body_start:_, body_len:_ } => {
-                // stack overflow
-                return Res::Ok; 
-            },
-            OpCode::Break{ exit } => {
-                //return Res::Ok;
-                return Res::Break(exit);
-            },
-            OpCode::BreakIfTrue { value, exit } => {
-                //return Res::Ok;
-                if self.r[value].to_bool(){
-                    return Res::Break(exit)
-                }
-            },
-            OpCode::BreakIfFalse { value, exit } => {
-                //return Res::Ok;
-                if !self.r[value].to_bool(){
-                    return Res::Break(exit)
-                }
-            },
-            OpCode::BreakIfIterDone{ exit } => {
-                //return Res::Ok;
-                if self.iter_done{
-                    return Res::Break(exit);
-                }
+            OpCode::Debugger => {}
+            OpCode::IsNullish { result, value } => {
+                let v = self.r[value];
+                self.r[result] = (v.is_null() || v.is_undefined()).into();
             }
             OpCode::Add {
                 result,
                 left,
                 right,
             } => {
-
                 let lhs = self.r[left];
                 let rhs = self.r[right];
-                if likely(lhs.is_number() && rhs.is_number()){
-                    unsafe{self.r[result] = JValue::Number(lhs.value.number + rhs.value.number)};
-                } else{
-                    self.r[result] = lhs + rhs;
+
+                if likely(lhs.is_number() && rhs.is_number()) {
+                    self.r[result] =
+                        JValue::create_number(lhs.as_number_uncheck() + rhs.as_number_uncheck());
+                } else {
+                    self.r[result] = lhs.add(rhs, ctx)?;
                 }
+            }
+            OpCode::AddImmI32 {
+                result,
+                left,
+                right,
+            } => {
+                let lhs = self.r[left];
+                if likely(lhs.is_number()) {
+                    self.r[result] = (lhs.as_number_uncheck() + right as f64).into();
+                } else if likely(lhs.is_int()) {
+                    self.r[result] = (lhs.as_int_unchecked() + right as i32).into();
+                } else {
+                    self.r[result] = (lhs.add((right as f64).into(), ctx))?;
+                }
+            }
+            OpCode::AddImmF32 {
+                result,
+                left,
+                right,
+            } => {
+                let lhs = self.r[left];
+                if likely(lhs.is_number()) {
+                    self.r[result] = unsafe { lhs.as_number_uncheck() + right as f64 }.into();
+                } else {
+                    self.r[result] = (lhs.add((right as f64).into(), ctx))?;
+                }
+            }
+            OpCode::AddImmStr { result, left, str } => {
+                let lhs = self.r[left];
+                self.r[result] = (lhs.to_string() + self.runtime.get_string(str)).into();
             }
             OpCode::Sub {
                 result,
                 left,
                 right,
             } => {
-                self.r[result] = self.r[left] - self.r[right];
+                let lhs = self.r[left];
+                let rhs = self.r[right];
+
+                if likely(lhs.is_number() && rhs.is_number()) {
+                    self.r[result] = unsafe {
+                        JValue::create_number(lhs.as_number_uncheck() - rhs.as_number_uncheck())
+                    };
+                } else {
+                    self.r[result] = lhs.sub(rhs, ctx)?;
+                }
+            }
+            OpCode::SubImmI32 {
+                result,
+                left,
+                right,
+            } => {
+                let lhs = self.r[left];
+                if likely(lhs.is_number()) {
+                    self.r[result] = unsafe { lhs.as_number_uncheck() - right as f64 }.into();
+                } else {
+                    self.r[result] = lhs.sub((right as f64).into(), ctx)?;
+                }
+            }
+            OpCode::SubImmF32 {
+                result,
+                left,
+                right,
+            } => {
+                let lhs = self.r[left];
+                if likely(lhs.is_number()) {
+                    self.r[result] = unsafe { lhs.as_number_uncheck() - right as f64 }.into();
+                } else {
+                    self.r[result] = lhs.sub((right as f64).into(), ctx)?;
+                }
             }
             OpCode::Mul {
                 result,
                 left,
                 right,
             } => {
-                self.r[result] = self.r[left] * self.r[right];
+                let lhs = self.r[left];
+                let rhs = self.r[right];
+
+                if likely(lhs.is_number() && rhs.is_number()) {
+                    unsafe {
+                        self.r[result] = JValue::create_number(
+                            lhs.as_number_uncheck() * rhs.as_number_uncheck(),
+                        );
+                    }
+                } else {
+                    self.r[result] = lhs.mul(rhs, ctx)?;
+                };
+            }
+            OpCode::MulImmI32 {
+                result,
+                left,
+                right,
+            } => {
+                let lhs = self.r[left];
+                if likely(lhs.is_number()) {
+                    self.r[result] = unsafe { lhs.as_number_uncheck() * right as f64 }.into();
+                } else {
+                    self.r[result] = lhs.mul((right as f64).into(), ctx)?;
+                }
+            }
+            OpCode::MulImmF32 {
+                result,
+                left,
+                right,
+            } => {
+                let lhs = self.r[left];
+                if likely(lhs.is_number()) {
+                    self.r[result] = unsafe { lhs.as_number_uncheck() * right as f64 }.into();
+                } else {
+                    self.r[result] = lhs.mul((right as f64).into(), ctx)?;
+                }
             }
             OpCode::Div {
                 result,
                 left,
                 right,
             } => {
-                self.r[result] = self.r[left] / self.r[right];
+                let lhs = self.r[left];
+                let rhs = self.r[right];
+
+                if likely(lhs.is_number() && rhs.is_number()) {
+                    self.r[result] = unsafe {
+                        JValue::create_number(lhs.as_number_uncheck() / rhs.as_number_uncheck())
+                    };
+                } else {
+                    self.r[result] = lhs.div(rhs, ctx)?;
+                };
+            }
+            OpCode::DivImmI32 {
+                result,
+                left,
+                right,
+            } => {
+                let lhs = self.r[left];
+                if likely(lhs.is_number()) {
+                    self.r[result] = unsafe { lhs.as_number_uncheck() / right as f64 }.into();
+                } else {
+                    self.r[result] = lhs.div((right as f64).into(), ctx)?;
+                }
+            }
+            OpCode::DivImmF32 {
+                result,
+                left,
+                right,
+            } => {
+                let lhs = self.r[left];
+                if likely(lhs.is_number()) {
+                    self.r[result] = unsafe { lhs.as_number_uncheck() / right as f64 }.into();
+                } else {
+                    self.r[result] = lhs.div((right as f64).into(), ctx)?;
+                }
             }
             OpCode::Rem {
                 result,
                 left,
                 right,
             } => {
-                self.r[result] = self.r[left] % self.r[right];
+                let lhs = self.r[left];
+                let rhs = self.r[right];
+
+                if likely(lhs.is_number() && rhs.is_number()) {
+                    self.r[result] = unsafe {
+                        JValue::create_number(lhs.as_number_uncheck() % rhs.as_number_uncheck())
+                    };
+                } else {
+                    self.r[result] = lhs.rem(rhs, ctx)?;
+                };
+            }
+            OpCode::RemImmI32 {
+                result,
+                left,
+                right,
+            } => {
+                let lhs = self.r[left];
+                if likely(lhs.is_number()) {
+                    self.r[result] = unsafe { lhs.as_number_uncheck() % right as f64 }.into();
+                } else {
+                    self.r[result] = lhs.rem((right as f64).into(), ctx)?;
+                }
+            }
+            OpCode::RemImmF32 {
+                result,
+                left,
+                right,
+            } => {
+                let lhs = self.r[left];
+                if likely(lhs.is_number()) {
+                    self.r[result] = unsafe { lhs.as_number_uncheck() % right as f64 }.into();
+                } else {
+                    self.r[result] = lhs.rem((right as f64).into(), ctx)?;
+                }
             }
             OpCode::And {
                 result,
@@ -319,6 +604,14 @@ impl<'a> Interpreter<'a> {
                 right,
             } => {
                 self.r[result] = (self.r[left].to_bool() && self.r[right].to_bool()).into();
+            }
+            OpCode::AndImm {
+                result,
+                left,
+                right,
+            } => {
+                let lhs = self.r[left];
+                self.r[result] = (lhs.to_bool() && right).into();
             }
             OpCode::Or {
                 result,
@@ -329,172 +622,620 @@ impl<'a> Interpreter<'a> {
                     self.r[result] = self.r[left];
                 } else {
                     self.r[result] = self.r[right];
-                }
+                };
             }
+
             OpCode::Not { result, right } => {
                 self.r[result] = (!self.r[right].to_bool()).into();
             }
+
             OpCode::Exp {
                 result,
                 left,
                 right,
             } => {
-                let (v, error) = unsafe { self.r[left].exp_(self.r[right]) };
-                if error {
-                    return Res::Err(v);
-                }
-                self.r[result] = v;
+                let lhs = self.r[left];
+                let rhs = self.r[right];
+
+                if likely(lhs.is_number() && rhs.is_number()) {
+                    unsafe {
+                        self.r[result] = JValue::create_number(
+                            lhs.as_number_uncheck().powf(rhs.as_number_uncheck()),
+                        );
+                    }
+                } else {
+                    self.r[result] = lhs.exp(rhs, ctx)?;
+                };
             }
+            OpCode::ExpImmI32 {
+                result,
+                left,
+                right,
+            } => {
+                let lhs = self.r[left];
+                if likely(lhs.is_number()) {
+                    self.r[result] = unsafe { lhs.as_number_uncheck().powf(right as f64) }.into();
+                } else {
+                    self.r[result] = lhs.exp((right as f64).into(), ctx)?;
+                }
+            }
+            OpCode::ExpImmF32 {
+                result,
+                left,
+                right,
+            } => {
+                let lhs = self.r[left];
+                if likely(lhs.is_number()) {
+                    self.r[result] = unsafe { lhs.as_number_uncheck().powf(right as f64) }.into();
+                } else {
+                    self.r[result] = lhs.exp((right as f64).into(), ctx)?;
+                }
+            }
+
             OpCode::Plus { result, right } => {
-                self.r[result] = self.r[right].to_number().into();
+                let rhs = self.r[right];
+
+                if likely(rhs.is_number()) {
+                    self.r[result] = rhs;
+                } else if likely(rhs.is_int()) {
+                    self.r[result] = rhs;
+                } else {
+                    self.r[result] = self.r[right].to_number(ctx)?.into();
+                }
             }
             OpCode::Minus { result, right } => {
-                self.r[result] = (-self.r[right].to_number()).into();
+                let v = self.r[right];
+
+                if likely(v.is_number()) {
+                    self.r[result] = unsafe { JValue::create_number(-v.as_number_uncheck()) };
+                } else if likely(v.is_int()) {
+                    self.r[result] = JValue::create_int(-v.as_int_unchecked());
+                } else {
+                    self.r[result] = (-v.to_number(ctx)?).into();
+                };
             }
+
             OpCode::LShift {
                 result,
                 left,
                 right,
             } => {
-                self.r[result] = self.r[left] << self.r[right];
+                let lhs = self.r[left];
+                let rhs = self.r[right];
+
+                if likely(lhs.is_number() && rhs.is_number()) {
+                    self.r[result] = unsafe {
+                        JValue::create_number(
+                            ((lhs.as_number_uncheck() as i32) << (rhs.as_number_uncheck() as i32))
+                                as f64,
+                        )
+                    }
+                } else {
+                    self.r[result] = lhs.lshift(rhs, ctx)?;
+                };
+            }
+            OpCode::LShiftImmI32 {
+                result,
+                left,
+                right,
+            } => {
+                let lhs = self.r[left];
+                if likely(lhs.is_number()) {
+                    self.r[result] =
+                        unsafe { (lhs.as_number_uncheck() as i32) << (right as i32) }.into();
+                } else {
+                    self.r[result] = ((lhs.to_i32(ctx)? as i32) << (right as i32)).into();
+                }
             }
             OpCode::RShift {
                 result,
                 left,
                 right,
             } => {
-                self.r[result] = self.r[left] >> self.r[right];
+                let lhs = self.r[left];
+                let rhs = self.r[right];
+
+                if likely(lhs.is_number() && rhs.is_number()) {
+                    self.r[result] = unsafe {
+                        JValue::create_number(
+                            ((lhs.as_number_uncheck() as i32) >> (rhs.as_number_uncheck() as i32))
+                                as f64,
+                        )
+                    }
+                } else {
+                    self.r[result] = lhs.rshift(rhs, ctx)?;
+                };
+            }
+            OpCode::RShiftImmI32 {
+                result,
+                left,
+                right,
+            } => {
+                let lhs = self.r[left];
+                if likely(lhs.is_number()) {
+                    self.r[result] =
+                        unsafe { (lhs.as_number_uncheck() as i32) >> (right as i32) }.into();
+                } else {
+                    self.r[result] = ((lhs.to_i32(ctx)?) >> (right as i32)).into();
+                }
             }
             OpCode::ZeroFillRShift {
                 result,
                 left,
                 right,
             } => {
-                self.r[result] = self.r[left].zerofillRshift(self.r[right]);
+                let lhs = self.r[left];
+                let rhs = self.r[right];
+                if likely(lhs.is_number() && rhs.is_number()) {
+                    self.r[result] = unsafe {
+                        JValue::create_number(
+                            ((lhs.as_number_uncheck() as u32) >> (rhs.as_number_uncheck() as u32))
+                                as f64,
+                        )
+                    }
+                } else {
+                    self.r[result] = lhs.unsigned_rshift(rhs, ctx)?;
+                };
+            }
+            OpCode::ZeroFillRShiftImmI32 {
+                result,
+                left,
+                right,
+            } => {
+                let lhs = self.r[left];
+                if likely(lhs.is_number()) {
+                    self.r[result] =
+                        unsafe { (lhs.as_number_uncheck() as u32) >> (right as u32) }.into();
+                } else {
+                    self.r[result] = ((lhs.to_i32(ctx)? as u32) >> (right as u32)).into();
+                }
             }
             OpCode::Gt {
                 result,
                 left,
                 right,
-            } => self.r[result] = (self.r[left] > self.r[right]).into(),
+            } => {
+                let lhs = self.r[left];
+                let rhs = self.r[right];
+
+                if likely(lhs.is_number() && rhs.is_number()) {
+                    self.r[result] =
+                        unsafe { lhs.as_number_uncheck() > rhs.as_number_uncheck() }.into();
+                } else {
+                    self.r[result] = (lhs.to_number(ctx)? > rhs.to_number(ctx)?).into();
+                };
+            }
+            OpCode::GtImmI32 {
+                result,
+                left,
+                right,
+            } => {
+                let lhs = self.r[left];
+                if likely(lhs.is_number()) {
+                    self.r[result] = unsafe { (lhs.as_number_uncheck()) > (right as f64) }.into();
+                } else {
+                    self.r[result] = ((lhs.to_number(ctx)?) > (right as f64)).into();
+                }
+            }
+            OpCode::GtImmF32 {
+                result,
+                left,
+                right,
+            } => {
+                let lhs = self.r[left];
+                if likely(lhs.is_number()) {
+                    self.r[result] = unsafe { (lhs.as_number_uncheck()) > (right as f64) }.into();
+                } else {
+                    self.r[result] = ((lhs.to_number(ctx)?) > (right as f64)).into();
+                }
+            }
             OpCode::GtEq {
                 result,
                 left,
                 right,
-            } => self.r[result] = (self.r[left] >= self.r[right]).into(),
+            } => {
+                let lhs = self.r[left];
+                let rhs = self.r[right];
+
+                if likely(lhs.is_number() && rhs.is_number()) {
+                    self.r[result] =
+                        unsafe { lhs.as_number_uncheck() >= rhs.as_number_uncheck() }.into();
+                } else {
+                    self.r[result] = (lhs.to_number(ctx)? >= rhs.to_number(ctx)?).into();
+                };
+            }
+            OpCode::GtEqImmI32 {
+                result,
+                left,
+                right,
+            } => {
+                let lhs = self.r[left];
+                if likely(lhs.is_number()) {
+                    self.r[result] = unsafe { (lhs.as_number_uncheck()) >= (right as f64) }.into();
+                } else {
+                    self.r[result] = ((lhs.to_number(ctx)?) >= (right as f64)).into();
+                }
+            }
+            OpCode::GtEqImmF32 {
+                result,
+                left,
+                right,
+            } => {
+                let lhs = self.r[left];
+                if likely(lhs.is_number()) {
+                    self.r[result] = unsafe { (lhs.as_number_uncheck()) >= (right as f64) }.into();
+                } else {
+                    self.r[result] = ((lhs.to_number(ctx)?) >= (right as f64)).into();
+                }
+            }
             OpCode::Lt {
                 result,
                 left,
                 right,
-            } => self.r[result] = (self.r[left] < self.r[right]).into(),
+            } => {
+                let rhs = self.r[right];
+                let lhs = self.r[left];
+
+                if likely(rhs.is_number() && lhs.is_number()) {
+                    unsafe {
+                        self.r[result] = (lhs.as_number_uncheck() < rhs.as_number_uncheck()).into()
+                    }
+                } else {
+                    self.r[result] = (lhs.to_number(ctx)? < rhs.to_number(ctx)?).into();
+                }
+            }
+            OpCode::LtImmI32 {
+                result,
+                left,
+                right,
+            } => {
+                let lhs = self.r[left];
+                if likely(lhs.is_number()) {
+                    self.r[result] = unsafe { (lhs.as_number_uncheck()) < (right as f64) }.into();
+                } else {
+                    self.r[result] = ((lhs.to_number(ctx)?) < (right as f64)).into();
+                }
+            }
+            OpCode::LtImmF32 {
+                result,
+                left,
+                right,
+            } => {
+                let lhs = self.r[left];
+                if likely(lhs.is_number()) {
+                    self.r[result] = unsafe { (lhs.as_number_uncheck()) < (right as f64) }.into();
+                } else {
+                    self.r[result] = ((lhs.to_number(ctx)?) < (right as f64)).into();
+                }
+            }
             OpCode::LtEq {
                 result,
                 left,
                 right,
-            } => self.r[result] = (self.r[left] <= self.r[right]).into(),
+            } => {
+                let lhs = self.r[left];
+                let rhs = self.r[right];
+
+                if likely(lhs.is_number() && rhs.is_number()) {
+                    self.r[result] =
+                        unsafe { lhs.as_number_uncheck() <= rhs.as_number_uncheck() }.into();
+                } else {
+                    self.r[result] = (lhs.to_number(ctx)? <= rhs.to_number(ctx)?).into();
+                };
+            }
+            OpCode::LtEqImmI32 {
+                result,
+                left,
+                right,
+            } => {
+                let lhs = self.r[left];
+                if likely(lhs.is_number()) {
+                    self.r[result] = unsafe { (lhs.as_number_uncheck()) <= (right as f64) }.into();
+                } else {
+                    self.r[result] = ((lhs.to_number(ctx)?) <= (right as f64)).into();
+                }
+            }
+            OpCode::LtEqImmF32 {
+                result,
+                left,
+                right,
+            } => {
+                let lhs = self.r[left];
+                if likely(lhs.is_number()) {
+                    self.r[result] = unsafe { (lhs.as_number_uncheck()) <= (right as f64) }.into();
+                } else {
+                    self.r[result] = ((lhs.to_number(ctx)?) <= (right as f64)).into();
+                }
+            }
             OpCode::EqEq {
                 result,
                 left,
                 right,
-            } => self.r[result] = unsafe { self.r[left].eqeq_(self.r[right]) },
+            } => {
+                let lhs = self.r[left];
+                let rhs = self.r[right];
+
+                if likely(lhs.is_number() && rhs.is_number()) {
+                    self.r[result] =
+                        unsafe { lhs.as_number_uncheck() == rhs.as_number_uncheck() }.into();
+                } else {
+                    self.r[result] = lhs.eqeq(rhs, ctx)?.into();
+                }
+            }
+            OpCode::EqEqImmI32 {
+                result,
+                left,
+                right,
+            } => {
+                let lhs = self.r[left];
+                if likely(lhs.is_number()) {
+                    self.r[result] = unsafe { (lhs.as_number_uncheck()) == (right as f64) }.into();
+                } else {
+                    self.r[result] = lhs.eqeq((right as f64).into(), ctx)?.into();
+                }
+            }
+            OpCode::EqEqImmF32 {
+                result,
+                left,
+                right,
+            } => {
+                let lhs = self.r[left];
+                if likely(lhs.is_number()) {
+                    self.r[result] = unsafe { (lhs.as_number_uncheck()) == (right as f64) }.into();
+                } else {
+                    self.r[result] = lhs.eqeq((right as f64).into(), ctx)?.into();
+                }
+            }
             OpCode::EqEqEq {
                 result,
                 left,
                 right,
             } => {
-                self.r[result] = unsafe {
-                    std::mem::transmute::<_, [usize; 2]>(self.r[left])
-                        == std::mem::transmute::<_, [usize; 2]>(self.r[right])
+                let lhs = self.r[left];
+                let rhs = self.r[right];
+
+                if lhs.to_bits() == rhs.to_bits() {
+                    self.r[result] = true.into();
+                } else {
+                    self.r[result] = (lhs == rhs).into();
                 }
-                .into()
+            }
+            OpCode::EqEqEqImmI32 {
+                result,
+                left,
+                right,
+            } => {
+                let lhs = self.r[left];
+                self.r[result] =
+                    unsafe { lhs.is_number() && lhs.as_number_uncheck() == right as f64 }.into();
+            }
+            OpCode::EqEqEqImmF32 {
+                result,
+                left,
+                right,
+            } => {
+                let lhs = self.r[left];
+                self.r[result] =
+                    unsafe { lhs.is_number() && lhs.as_number_uncheck() == right as f64 }.into();
             }
             OpCode::NotEq {
                 result,
                 left,
                 right,
-            } => self.r[result] = unsafe { !self.r[left].eqeq_(self.r[right]) },
+            } => {
+                let lhs = self.r[left];
+                let rhs = self.r[right];
+
+                if likely(lhs.is_number() && rhs.is_number()) {
+                    self.r[result] =
+                        unsafe { lhs.as_number_uncheck() != rhs.as_number_uncheck() }.into();
+                }
+                self.r[result] = (!lhs.eqeq(rhs, ctx)?).into();
+            }
+            OpCode::NotEqImmI32 {
+                result,
+                left,
+                right,
+            } => {
+                let lhs = self.r[left];
+                if likely(lhs.is_number()) {
+                    self.r[result] = unsafe { lhs.as_number_uncheck() != right as f64 }.into();
+                } else {
+                    self.r[result] = (!lhs.eqeq((right as f64).into(), ctx)?).into();
+                }
+            }
+            OpCode::NotEqImmF32 {
+                result,
+                left,
+                right,
+            } => {
+                let lhs = self.r[left];
+                if likely(lhs.is_number()) {
+                    self.r[result] = { lhs.as_number_uncheck() != right as f64 }.into();
+                } else {
+                    self.r[result] = (!lhs.eqeq((right as f64).into(), ctx)?).into();
+                }
+            }
             OpCode::NotEqEq {
                 result,
                 left,
                 right,
             } => {
-                self.r[result] = unsafe {
-                    !(std::mem::transmute::<_, [usize; 2]>(self.r[left])
-                        == std::mem::transmute::<_, [usize; 2]>(self.r[right]))
-                }
-                .into()
+                let lhs = self.r[left];
+                let rhs = self.r[right];
+
+                self.r[result] = (!(lhs == rhs)).into();
+            }
+            OpCode::NotEqEqImmI32 {
+                result,
+                left,
+                right,
+            } => {
+                let lhs = self.r[left];
+                self.r[result] =
+                    unsafe { !(lhs.is_number() && lhs.as_number_uncheck() == right as f64) }.into();
+            }
+            OpCode::NotEqEqImmF32 {
+                result,
+                left,
+                right,
+            } => {
+                let lhs = self.r[left];
+                self.r[result] =
+                    unsafe { !(lhs.is_number() && lhs.as_number_uncheck() == right as f64) }.into();
             }
             OpCode::BitAnd {
                 result,
                 left,
                 right,
             } => {
-                self.r[result] = self.r[left] & self.r[right];
+                let lhs = self.r[left];
+                let rhs = self.r[right];
+
+                if likely(lhs.is_number() && rhs.is_number()) {
+                    self.r[result] =
+                        unsafe { lhs.as_number_uncheck() as i32 & rhs.as_number_uncheck() as i32 }
+                            .into();
+                } else {
+                    self.r[result] = lhs.bitand(rhs, ctx)?;
+                };
             }
-            OpCode::BitNot { result, right } => {
-                self.r[result] = self.r[right].bitnot();
+            OpCode::BitAndImmI32 {
+                result,
+                left,
+                right,
+            } => {
+                let lhs = self.r[left];
+
+                if likely(lhs.is_number()) {
+                    self.r[result] =
+                        (lhs.as_number_uncheck() as i32 & right as i32).into();
+                } else {
+                    self.r[result] = (lhs.to_i32(ctx)? & right as i32).into();
+                };
             }
             OpCode::BitOr {
                 result,
                 left,
                 right,
             } => {
-                self.r[result] = self.r[left] | self.r[right];
+                let lhs = self.r[left];
+                let rhs = self.r[right];
+
+                if likely(lhs.is_number() && rhs.is_number()) {
+                    self.r[result] =
+                        unsafe { lhs.as_number_uncheck() as i32 | rhs.as_number_uncheck() as i32 }
+                            .into();
+                } else {
+                    self.r[result] = lhs.bitor(rhs, ctx)?;
+                };
+            }
+            OpCode::BitOrImmI32 {
+                result,
+                left,
+                right,
+            } => {
+                let lhs = self.r[left];
+
+                if likely(lhs.is_number()) {
+                    self.r[result] =
+                        unsafe { lhs.as_number_uncheck() as i32 | right as i32 }.into();
+                } else {
+                    self.r[result] = (lhs.to_i32(ctx)? | right as i32).into();
+                };
             }
             OpCode::BitXor {
                 result,
                 left,
                 right,
             } => {
-                self.r[result] = self.r[left] ^ self.r[right];
-            }
-            OpCode::Await { result, future } => {
-                let (v, error) = if self.is_global {
-                    self.r[future].wait()
-                } else {
-                    operations::async_wait(self.r[future])
-                };
+                let lhs = self.r[left];
+                let rhs = self.r[right];
 
-                if error {
-                    return Res::Err(v);
+                if likely(lhs.is_number() && rhs.is_number()) {
+                    self.r[result] =
+                        unsafe { lhs.as_number_uncheck() as i32 ^ rhs.as_number_uncheck() as i32 }
+                            .into();
+                } else {
+                    self.r[result] = lhs.bitxor(rhs, ctx)?;
+                };
+            }
+            OpCode::BitXorImmI32 {
+                result,
+                left,
+                right,
+            } => {
+                let lhs = self.r[left];
+
+                if likely(lhs.is_number()) {
+                    self.r[result] =
+                        unsafe { lhs.as_number_uncheck() as i32 ^ right as i32 }.into();
+                } else {
+                    self.r[result] = (lhs.to_i32(ctx)? ^ right as i32).into();
+                };
+            }
+            OpCode::BitNot { result, right } => {
+                let rhs = self.r[right];
+
+                if likely(rhs.is_number()) {
+                    self.r[result] = unsafe { !(rhs.as_number_uncheck() as i32) }.into();
+                } else {
+                    self.r[result] = (!rhs.to_i32(ctx)?).into();
                 }
-                self.r[result] = v;
             }
-            OpCode::Yield { result, arg } => {
-                self.r[result] = operations::Yield(self.r[arg]);
-            }
+
+            OpCode::Await { result, future } => return Ok(Res::Await(self.r[future], result)),
+            OpCode::Yield { result, arg } => return Ok(Res::Yield(self.r[arg], result)),
             OpCode::In {
                 result,
                 left,
                 right,
             } => {
-                let (v, error) = unsafe { self.r[left].In_(self.r[right]) };
-                if error {
-                    return Res::Err(v);
+                let lhs = self.r[left];
+                let rhs = self.r[right];
+
+                if let Some(obj) = rhs.as_object() {
+                    let key = lhs.to_property_key(ctx)?;
+                    self.r[result] = obj.has_property(key).into();
+                } else {
+                    return Err(Error::TypeError(format!(
+                        "Cannot use 'in' operator to search for '{}' in {}",
+                        lhs.to_string(),
+                        rhs.to_string()
+                    ))
+                    .into());
                 }
-                self.r[result] = v;
             }
             OpCode::PrivateIn {
                 result,
                 name,
                 right,
             } => {
-                self.r[result] = unsafe { self.r[right].private_in(name) };
+                let rhs = self.r[right];
+
+                let key = self.runtime.get_field_name(name);
+
+                if let Some(obj) = rhs.as_object() {
+                    self.r[result] = obj.has_property(PropKey(name)).into();
+                } else {
+                    return Err(Error::TypeError(format!(
+                        "Cannot use 'in' operator to search for '#{}' in {}",
+                        key,
+                        rhs.to_string()
+                    ))
+                    .into());
+                }
             }
             OpCode::InstanceOf {
                 result,
                 left,
                 right,
             } => {
-                let (v, error) = unsafe { self.r[left].instance_of_(self.r[right]) };
-                if error {
-                    return Res::Err(v);
-                }
-                self.r[result] = v;
+                self.r[result] = self.r[left].instance_of(self.r[right], ctx)?;
             }
             OpCode::TypeOf { result, right } => {
-                let s = self.r[right].type_str();
-                self.r[result] = JValue::String(JString::from_static(s));
+                let s = self.r[right].typ().as_str();
+                self.r[result] = JValue::create_static_string(s);
             }
             OpCode::Select { a, b, result } => {
                 if self.r[a].is_undefined() {
@@ -516,6 +1257,7 @@ impl<'a> Interpreter<'a> {
                 right,
             } => {
                 let l = self.r[left];
+
                 if l.is_undefined() || l.is_null() {
                     self.r[result] = self.r[right];
                 } else {
@@ -523,35 +1265,46 @@ impl<'a> Interpreter<'a> {
                 }
             }
 
-            OpCode::Throw { value } => return Res::Err(self.r[value]),
-            OpCode::Return { value } => return Res::Return(self.r[value]),
+            OpCode::Throw { value } => return Err(self.r[value]),
+            OpCode::Return { value } => return Ok(Res::Return(self.r[value])),
 
             ///////////////////////////////////////////////////////////////////////
             //   iterator
             //////////////////////////////////////////////////////////////////////
-            OpCode::IntoIter { target, hint } => {
-                let iter = unsafe { FastIterator::new(self.r[target], hint) };
+            OpCode::PrepareForIn { target } => {
+                todo!();
+                let obj = self.r[target];
+                let iter = JSIterator::new(obj, ctx)?;
                 self.iterators.push(iter);
+                
+            }
+            OpCode::PrepareForOf { target } => {
+                let obj = self.r[target];
+                let iter = JSIterator::new(obj, ctx)?;
+                self.iterators.push(iter);
+
             }
             OpCode::IterDrop => {
-                let iter = self.iterators.pop().unwrap();
-                FastIterator::drop_(iter);
+                self.iterators.pop();
             }
             OpCode::IterNext {
                 result,
+                done,
                 hint: _,
                 stack_offset,
             } => {
                 let iter = self.iterators.last_mut().unwrap();
-
-                let stack = &mut self.stack[stack_offset as usize..];
-
-                let (done, error, value) = iter.next(*this, stack.as_mut_ptr());
-                if error {
-                    return Res::Err(value);
-                }
-                self.iter_done = done;
-                self.r[result] = value;
+                let re = iter.next();
+                match re {
+                    Some(v) => match v {
+                        Ok(v) => self.r[result] = v,
+                        Err(e) => return Err(e),
+                    },
+                    None => {
+                        self.r[result] = JValue::UNDEFINED;
+                        self.r[done] = JValue::TRUE;
+                    }
+                };
             }
             OpCode::IterCollect {
                 result,
@@ -559,13 +1312,17 @@ impl<'a> Interpreter<'a> {
             } => {
                 let iter = self.iterators.last_mut().unwrap();
 
-                let stack = &mut self.stack[stack_offset as usize..];
-
-                let (v, error) = iter.collect(*this, stack.as_mut_ptr());
-                if error {
-                    return Res::Err(v);
+                let mut values = Vec::new();
+                for i in iter {
+                    match i {
+                        Ok(v) => {
+                            values.push((PropFlag::THREE, v));
+                        }
+                        Err(e) => return Err(e),
+                    }
                 }
-                self.r[result] = v;
+                let obj = JObject::with_array(values);
+                self.r[result] = obj.into();
             }
 
             //////////////////////////////////////////////////////////////////
@@ -578,10 +1335,10 @@ impl<'a> Interpreter<'a> {
                 self.temps.push(self.r[value]);
             }
             OpCode::ReadTemp { value } => {
-                self.r[value] = *self.temps.last().unwrap();
+                self.r[value] = *unsafe { self.temps.get_unchecked(self.temps.len() - 1) };
             }
             OpCode::ReleaseTemp => {
-                self.temps.pop();
+                unsafe { self.temps.set_len(self.temps.len() - 1) };
             }
             OpCode::WriteToStack { from, stack_offset } => {
                 self.stack[stack_offset as usize] = self.r[from];
@@ -593,34 +1350,48 @@ impl<'a> Interpreter<'a> {
                 self.r[result] = self.stack[stack_offset as usize];
             }
 
-            OpCode::DeclareDynamicVar { from, kind: _, id } => {
-                self.runtime.declare_variable_static(id, self.r[from]);
+            OpCode::DeclareDynamicVar {
+                from,
+                kind: _,
+                offset,
+            } => {
+                let v = self
+                    .runtime
+                    .to_mut()
+                    .stack
+                    .get_mut(offset as usize)
+                    .unwrap();
+                *v = self.r[from];
             }
             OpCode::WriteDynamicVar { from, id } => {
                 self.runtime.to_mut().set_variable(id, self.r[from]);
             }
             OpCode::ReadDynamicVar { result, id } => {
-                let (v, error) = self.runtime.to_mut().get_variable(id);
-                if error {
-                    return Res::Err(v);
-                }
-                self.r[result] = v;
+                match self.runtime.to_mut().get_variable(id) {
+                    Err(e) => return Err(e),
+                    Ok(v) => {
+                        self.r[result] = v;
+                    }
+                };
             }
-
-            OpCode::Capture {
-                stack_offset,
-                capture_stack_offset,
-            } => {
-                if let Some(c) = &mut self.capture_stack {
-                    c[capture_stack_offset as usize] = self.stack[stack_offset as usize];
-                } else {
-                    panic!("capture variable on global context")
-                }
+            OpCode::WriteDynamicVarDeclared { from, offset } => {
+                let v = unsafe {
+                    self.runtime
+                        .to_mut()
+                        .stack
+                        .get_unchecked_mut(offset as usize)
+                };
+                *v = self.r[from];
+            }
+            OpCode::ReadDynamicVarDeclared { result, offset } => {
+                let v = unsafe { self.runtime.stack.get_unchecked(offset as usize) };
+                self.r[result] = *v;
             }
             OpCode::ReadCapturedVar { result, offset } => {
                 if let Some(c) = &mut self.capture_stack {
                     self.r[result] = c[offset as usize];
                 } else {
+                    #[cfg(test)]
                     panic!("reading capture variable on global context")
                 }
             }
@@ -628,36 +1399,9 @@ impl<'a> Interpreter<'a> {
                 if let Some(c) = &mut self.capture_stack {
                     c[offset as usize] = self.r[from];
                 } else {
+                    #[cfg(test)]
                     panic!("capture variable on global context")
                 }
-            }
-
-            OpCode::TempAlloc { size } => {
-                let mut v = Vec::with_capacity(size as usize);
-                v.resize(size as usize, 0u8);
-                self.temp_allocates.push(unsafe { Box::from_raw(v.leak()) });
-            }
-            OpCode::TempDealloc { size: _ } => {
-                self.temp_allocates.pop();
-            }
-            OpCode::StoreTempAlloc {
-                offset,
-                flag,
-                value,
-            } => {
-                let s = &mut self.temp_allocates.last_mut().unwrap()[offset as usize..];
-                let v = s.as_mut_ptr() as *mut TempAllocValue;
-                unsafe {
-                    *v = TempAllocValue {
-                        flag,
-                        value: self.r[value],
-                    }
-                };
-            }
-            OpCode::ReadTempAlloc { offset, result } => {
-                let s = &mut self.temp_allocates.last_mut().unwrap()[offset as usize..];
-                let v = unsafe { (s.as_mut_ptr() as *mut TempAllocValue).as_mut().unwrap() };
-                self.r[result] = v.value;
             }
             OpCode::SetThis { value } => {
                 *this = self.r[value];
@@ -667,11 +1411,9 @@ impl<'a> Interpreter<'a> {
             //            function
             ////////////////////////////////////////////////////////////////
             OpCode::CreateArg {
-                stack_offset:_,
+                stack_offset: _,
                 len: _,
-            } => {
-
-            },
+            } => {}
             OpCode::PushArg {
                 value,
                 stack_offset,
@@ -682,52 +1424,21 @@ impl<'a> Interpreter<'a> {
                 value,
                 stack_offset,
             } => {
-                self.stack[stack_offset as usize] = self.r[value].spread();
+                self.stack[stack_offset as usize] = self.r[value];
+            }
+            OpCode::SpreadArg {
+                base_stack_offset,
+                stack_offset,
+                args_len,
+            } => {
+                todo!()
             }
             OpCode::FinishArgs {
-                base_stack_offset,
+                base_stack_offset: _,
                 len,
             } => {
-                //todo: unknown bug
-                let mut len = len as usize;
-                let mut i = base_stack_offset as usize;
-
-                while i < base_stack_offset as usize + len {
-
-                    let v = self.stack[i as usize];
-
-                    if v.is_spread(){
-                        let mut values = vec![];
-                        
-                        let iter =
-                            unsafe { FastIterator::new(v, crate::bytecodes::LoopHint::For) };
-                        loop {
-                            let offset = base_stack_offset as usize + len;
-                            let stack = &mut self.stack[offset..];
-
-                            let (done, error, value) = iter.next(*this, stack.as_mut_ptr());
-                            if error {
-                                return Res::Err(value);
-                            }
-                            values.push(value);
-                            if done {
-                                break;
-                            }
-                        };
-
-                        FastIterator::drop_(iter);
-                        len  += values.len() -1;
-                        i += values.len()-1;
-
-                        unsafe{
-                            let p = self.stack.as_mut_ptr().add(i);
-                            std::ptr::copy(p, p.add(values.len()), values.len());
-                            std::ptr::copy(values.as_ptr(), p, values.len());
-                        };
-                    }
-                    i += 1;
-                };
-                self.arg_len = len as usize;
+                self.arg_len = (len as i64 + self.arg_offset_counter) as usize;
+                self.arg_offset_counter = 0;
             }
 
             OpCode::ReadParam { result, index } => {
@@ -742,10 +1453,14 @@ impl<'a> Interpreter<'a> {
 
                 if (start as usize) < args.len() {
                     for i in &args[start as usize..] {
-                        obj.as_array().unwrap().push((Default::default(), *i));
+                        unsafe { obj.as_array().unwrap_unchecked() }.push((Default::default(), *i));
                     }
                 }
-                self.r[result] = JValue::Object(obj);
+                self.r[result] = JValue::create_object(obj);
+            }
+
+            OpCode::PrepareInlinedCall { stack_offset } => {
+                todo!()
             }
 
             OpCode::Call {
@@ -753,44 +1468,24 @@ impl<'a> Interpreter<'a> {
                 this,
                 callee,
                 stack_offset,
+                args_len,
             } => {
-                let stack = &mut self.stack[stack_offset as usize..];
-                let (v, error) = unsafe {
-                    self.r[callee].call_raw(
-                        self.runtime,
-                        self.r[this],
-                        stack.as_mut_ptr(),
-                        self.arg_len as u32,
-                    )
-                };
-                if error {
-                    return Res::Err(v);
-                }
+                let callee = self.r[callee];
+                let this = self.r[this];
+                let args =
+                    &mut self.stack[stack_offset as usize..args_len as usize + stack_offset as usize];
+                let stack = unsafe { args.as_mut_ptr().add(args_len as usize) };
+
+                let v = callee.call(
+                    this,
+                    args,
+                    JSContext {
+                        stack: stack,
+                        runtime: self.runtime,
+                    },
+                )?;
+
                 self.r[result] = v;
-            }
-            OpCode::CallOptChain {
-                result,
-                this,
-                callee,
-                stack_offset,
-            } => {
-                if self.r[callee].is_null() || self.r[callee].is_undefined() {
-                    self.r[result] = JValue::UNDEFINED;
-                } else {
-                    let stack = &mut self.stack[stack_offset as usize..];
-                    let (v, error) = unsafe {
-                        self.r[callee].call_raw(
-                            self.runtime,
-                            self.r[this],
-                            stack.as_mut_ptr(),
-                            self.arg_len as u32,
-                        )
-                    };
-                    if error {
-                        return Res::Err(v);
-                    }
-                    self.r[result] = v;
-                }
             }
             OpCode::New {
                 result,
@@ -800,14 +1495,19 @@ impl<'a> Interpreter<'a> {
                 let stack = &mut self.stack[stack_offset as usize..];
 
                 let constructor = self.r[callee];
-                let (v, error) = operations::invoke_new(
+                let mut r = Default::default();
+                operations::invoke_new(
                     constructor,
                     self.runtime,
                     stack.as_mut_ptr(),
-                    self.arg_len as u32,
+                    self.arg_len,
+                    &mut r
                 );
+                let v = r.0;
+                let error = r.1;
+
                 if error {
-                    return Res::Err(v);
+                    return Err(v);
                 }
                 self.r[result] = v;
             }
@@ -823,33 +1523,28 @@ impl<'a> Interpreter<'a> {
             ////////////////////////////////////////////////////////////////////////
             OpCode::CreateBlock(_b) => {
                 //self.blocks.insert(b, None);
-            },
+            }
             OpCode::SwitchToBlock(b) => {
-                if !self.blocks.contains_key(&b){
-                    self.blocks.insert(b, *index);
-                }
-            },
-            OpCode::Jump { to, line:_ } => {
-                self.need_jump = Some(to);
-            },
-            OpCode::JumpIfFalse { value, to } => {
+                //self.insert_block(b, *index)
+            }
+            OpCode::Jump { to, line } => {
+                *index = line as usize;
+                return Ok(Res::Ok);
+            }
+            OpCode::JumpIfFalse { value, to, line } => {
                 if !self.r[value].to_bool() {
-                    self.need_jump = Some(to);
+                    *index = line as usize;
+                    return Ok(Res::Ok);
                 }
-            },
-            OpCode::JumpIfIterDone { to } => {
-                if self.iter_done {
-                    self.iter_done = false;
-                    self.need_jump = Some(to);
-                }
-            },
-            OpCode::JumpIfTrue { value, to } => {
+            }
+            OpCode::JumpIfTrue { value, to:_, line } => {
                 if self.r[value].to_bool() {
-                    self.need_jump = Some(to);
+                    *index = line as usize;
+                    return Ok(Res::Ok);
                 }
-            },
-            OpCode::EnterTry { catch_block } => {
-                self.catch_block.push(catch_block);
+            }
+            OpCode::EnterTry { catch_block, line } => {
+                self.catch_block.push((catch_block, line));
             }
             OpCode::ExitTry => {
                 self.catch_block.pop();
@@ -877,17 +1572,17 @@ impl<'a> Interpreter<'a> {
                 self.r[result] = self.runtime.get_unamed_constant(id);
             }
             OpCode::LoadStaticBigInt32 { result, value } => {
-                self.r[result] = JValue::BigInt(value as i64);
+                self.r[result] = JValue::create_bigint(value as i64);
             }
             OpCode::LoadStaticFloat { result, id } => {
                 self.r[result] = self.runtime.get_unamed_constant(id);
             }
             OpCode::LoadStaticFloat32 { result, value } => {
-                self.r[result] = JValue::Number(value as f64);
+                self.r[result] = JValue::create_number(value as f64);
             }
             OpCode::LoadStaticString { result, id } => {
                 let s = self.runtime.get_string(id);
-                self.r[result] = JValue::String(JString::from_static(s));
+                self.r[result] = JValue::create_string(self.runtime.allocate_string(s));
             }
 
             //////////////////////////////////////////////////////////////////
@@ -904,70 +1599,22 @@ impl<'a> Interpreter<'a> {
                 let id = self.runtime.register_field_name(&field);
                 let stack = &mut self.stack[stack_offset as usize..];
 
-                let (re, error) = obj.get_property_raw(id, stack.as_mut_ptr());
-
-                if error {
-                    return Res::Err(re);
-                }
-                self.r[result] = re;
+                self.r[result] = obj.get_property(
+                    PropKey(id),
+                    JSContext {
+                        stack: stack.as_mut_ptr(),
+                        runtime: self.runtime,
+                    },
+                )?;
             }
-            OpCode::ReadFieldOptChain {
+            OpCode::ReadFieldStatic {
                 obj,
-                field,
                 result,
-                stack_offset,
+                field_id,
             } => {
                 let obj = self.r[obj];
 
-                if obj.is_null() || obj.is_undefined() {
-                    self.r[result] = JValue::UNDEFINED;
-                } else {
-                    let field = self.r[field].to_string();
-                    let id = self.runtime.register_field_name(&field);
-                    let stack = &mut self.stack[stack_offset as usize..];
-
-                    let (re, error) = obj.get_property_raw(id, stack.as_mut_ptr());
-
-                    if error {
-                        return Res::Err(re);
-                    }
-                    self.r[result] = re;
-                }
-            }
-            OpCode::ReadFieldStatic {
-                obj_result,
-                field_id,
-                stack_offset,
-            } => {
-                let obj = self.r[obj_result.target()];
-                let stack = &mut self.stack[stack_offset as usize..];
-
-                let (re, error) = obj.get_property_raw(field_id, stack.as_mut_ptr());
-
-                if error {
-                    return Res::Err(re);
-                }
-                self.r[obj_result.value()] = re;
-            }
-            OpCode::ReadFieldStaticOptChain {
-                obj_result,
-                field_id,
-                stack_offset,
-            } => {
-                let obj = self.r[obj_result.target()];
-
-                if obj.is_null() || obj.is_undefined() {
-                    self.r[obj_result.value()] = JValue::UNDEFINED;
-                } else {
-                    let stack = &mut self.stack[stack_offset as usize..];
-
-                    let (re, error) = obj.get_property_raw(field_id, stack.as_mut_ptr());
-
-                    if error {
-                        return Res::Err(re);
-                    }
-                    self.r[obj_result.value()] = re;
-                }
+                self.r[result] = obj.get_property(PropKey(field_id), ctx)?;
             }
 
             OpCode::WriteField {
@@ -981,130 +1628,125 @@ impl<'a> Interpreter<'a> {
                 let id = self.runtime.register_field_name(&field);
                 let stack = &mut self.stack[stack_offset as usize..];
 
-                let (re, error) = obj.set_property_raw(id, self.r[value], stack.as_mut_ptr());
-
-                if error {
-                    return Res::Err(re);
-                }
-            }
-            OpCode::WriteFieldOptChain {
-                obj,
-                field,
-                from,
-                stack_offset,
-            } => {
-                let obj = self.r[obj];
-                if obj.is_null() || obj.is_undefined() {
-                } else {
-                    let field = self.r[field].to_string();
-                    let id = self.runtime.register_field_name(&field);
-                    let stack = &mut self.stack[stack_offset as usize..];
-
-                    let (re, error) = obj.set_property_raw(id, self.r[from], stack.as_mut_ptr());
-
-                    if error {
-                        return Res::Err(re);
-                    }
-                }
+                obj.set_property(
+                    PropKey(id),
+                    self.r[value],
+                    JSContext {
+                        stack: stack.as_mut_ptr(),
+                        runtime: self.runtime,
+                    },
+                )?;
             }
             OpCode::WriteFieldStatic {
-                obj_value,
+                obj,
+                value,
                 field_id,
-                stack_offset,
             } => {
-                let obj = self.r[obj_value.target()];
-                let value = self.r[obj_value.value()];
+                let obj = self.r[obj];
+                let value = self.r[value];
 
-                let stack = &mut self.stack[stack_offset as usize..];
-
-                let (re, error) = obj.set_property_raw(field_id, value, stack.as_mut_ptr());
-
-                if error {
-                    return Res::Err(re);
+                let re = obj.set_property(PropKey(field_id), value, ctx);
+                match re {
+                    Ok(()) => {}
+                    Err(e) => return Err(e),
                 }
             }
 
             OpCode::RemoveFieldStatic { obj, field_id } => {
                 let obj = self.r[obj];
-                if obj.is_object() {
-                    unsafe { obj.remove_key_static_(field_id) }
+                if let Some(obj) = obj.as_object() {
+                    obj.remove_property(PropKey(field_id));
                 }
             }
 
             OpCode::ReadSuperField {
-                constructor_result,
+                constructor,
+                result,
                 field,
                 stack_offset,
             } => {
                 let stack = &mut self.stack[stack_offset as usize..];
-                let (v, err) = unsafe {
+                let mut r = Default::default();
+                unsafe {
                     operations::super_prop(
                         &self.runtime,
-                        self.r[constructor_result.target()],
+                        self.r[constructor],
                         self.r[field],
                         stack.as_mut_ptr(),
+                        &mut r
                     )
                 };
+                let v = r.0;
+                let err = r.1;
                 if err {
-                    return Res::Err(v);
+                    return Err(v);
                 }
-                self.r[constructor_result.value()] = v;
+                self.r[result] = v;
             }
             OpCode::ReadSuperFieldStatic {
-                constructor_result,
+                constructor,
+                result,
                 field_id,
-                stack_offset,
             } => {
-                let stack = &mut self.stack[stack_offset as usize..];
-                let (v, err) = unsafe {
+                let mut r = Default::default();
+                unsafe {
                     operations::super_prop_static(
                         &self.runtime,
-                        self.r[constructor_result.target()],
+                        self.r[constructor],
                         field_id,
-                        stack.as_mut_ptr(),
+                        ctx.stack,
+                        &mut r
                     )
                 };
+                let v = r.0;
+                let err = r.1;
                 if err {
-                    return Res::Err(v);
+                    return Err(v);
                 }
-                self.r[constructor_result.value()] = v;
+                self.r[result] = v;
             }
             OpCode::WriteSuperField {
-                constructor_value,
+                constructor,
+                value,
                 field,
-                stack_offset,
             } => {
-                let stack = &mut self.stack[stack_offset as usize..];
-                let (v, err) = unsafe {
+                let mut r = Default::default();
+                unsafe {
                     operations::super_write_prop(
                         &self.runtime,
-                        self.r[constructor_value.target()],
+                        self.r[constructor],
                         self.r[field],
-                        self.r[constructor_value.value()],
-                        stack.as_mut_ptr(),
+                        self.r[value],
+                        ctx.stack,
+                        &mut r
                     )
                 };
+                let v = r.0;
+                let err = r.1;
                 if err {
-                    return Res::Err(v);
+                    return Err(v);
                 };
             }
             OpCode::WriteSuperFieldStatic {
-                constructor_value,
+                constructor,
+                value,
                 field,
-                stack_offset,
             } => {
-                let stack = &mut self.stack[stack_offset as usize..];
-                let (v, err) = unsafe {
+                let mut r = Default::default();
+                unsafe {
                     operations::super_write_prop_static(
                         &self.runtime,
-                        self.r[constructor_value.target()],
+                        self.r[constructor],
                         field,
-                        self.r[constructor_value.value()],
-                        stack.as_mut_ptr(),
+                        self.r[value],
+                        ctx.stack,
+                        &mut r
                     )
                 };
+                let v = r.0;
+                let err = r.1;
                 if err {
-                    return Res::Err(v);
+                    return Err(v);
                 };
             }
 
@@ -1114,11 +1756,9 @@ impl<'a> Interpreter<'a> {
                 getter,
             } => {
                 let obj = self.r[obj];
-                if obj.is_object() {
+                if let Some(obj) = obj.as_object() {
                     unsafe {
-                        obj.value
-                            .object
-                            .bind_getter(field_id, self.r[getter].value.object)
+                        obj.bind_getter(PropKey(field_id), self.r[getter].as_object().unwrap())
                     }
                 }
             }
@@ -1128,70 +1768,81 @@ impl<'a> Interpreter<'a> {
                 setter,
             } => {
                 let obj = self.r[obj];
-                if obj.is_object() {
-                    unsafe {
-                        obj.value
-                            .object
-                            .bind_setter(field_id, self.r[setter].value.object)
-                    }
+                if let Some(obj) = obj.as_object() {
+                    obj.bind_setter(PropKey(field_id), self.r[setter].as_object().unwrap());
                 }
             }
             OpCode::CloneObject { obj, result } => {
                 let obj = self.r[obj];
-                if obj.is_object() {
-                    self.r[result] = JValue::Object(unsafe { obj.value.object.deep_clone() });
+                if let Some(obj) = obj.as_object() {
+                    self.r[result] = JValue::create_object(unsafe { obj.deep_clone() });
                 }
             }
             OpCode::ExtendObject { obj, from } => {
-                unsafe { operations::extend_object(self.r[obj], self.r[from]) };
+                unsafe { operations::extend_object(self.r[obj], self.r[from], self.runtime) };
             }
 
             ////////////////////////////////////////////////////////////////
             //           creations
             ///////////////////////////////////////////////////////////////
-            OpCode::CreateArray { result } => {
-                self.r[result] = JValue::Object(JObject::array());
+            OpCode::CreateArray { result, stack_offset } => {
+                let e = &mut self.stack[stack_offset as usize..stack_offset as usize + self.arg_len];
+                let e = e.iter().map(|v|(Default::default(), *v)).collect();
+                let array = JObject::with_array(e);
+                self.r[result] = JValue::create_object(array);
             }
             OpCode::CreateArrow { result, this, id } => {
                 let f = if self.is_global {
-                    self.runtime
-                        .get_function(id)
-                        .unwrap()
-                        .create_instance(Some(self.r[this]))
+                    unsafe {
+                        self.runtime
+                            .get_function(id)
+                            .unwrap_unchecked()
+                            .create_instance(Some(self.r[this]))
+                    }
                 } else {
-                    let ptr = self.capture_stack.as_mut().unwrap().as_mut_ptr();
-                    self.runtime
-                        .get_function(id)
-                        .unwrap()
-                        .create_instance_with_capture(Some(self.r[this]), ptr)
+                    unsafe {
+                        self.runtime
+                            .get_function(id)
+                            .unwrap_unchecked()
+                            .create_instance_with_capture(
+                                Some(self.r[this]),
+                                self.cap.clone().unwrap(),
+                            )
+                    }
                 };
 
-                self.r[result] = JValue::Object(JObject::with_function(f));
+                self.r[result] = JValue::create_object(JObject::with_function(f));
             }
             OpCode::CreateFunction { result, id } => {
-                let f = if self.is_global {
-                    self.runtime.get_function(id).unwrap().create_instance(None)
-                } else {
-                    self.runtime
-                        .get_function(id)
-                        .unwrap()
-                        .create_instance_with_capture(
-                            None,
-                            self.capture_stack.as_mut().unwrap().as_mut_ptr(),
-                        )
+                let f = unsafe {
+                    if self.is_global {
+                        self.runtime
+                            .get_function(id)
+                            .unwrap_unchecked()
+                            .create_instance(None)
+                    } else {
+                        self.runtime
+                            .get_function(id)
+                            .unwrap()
+                            .create_instance_with_capture(None, self.cap.clone().unwrap())
+                    }
                 };
 
-                self.r[result] = JValue::Object(JObject::with_function(f));
+                self.r[result] = JValue::create_object(JObject::with_function(f));
             }
 
             OpCode::CreateObject { result } => {
-                self.r[result] = JValue::Object(JObject::new());
+                self.r[result] = JValue::create_object(JObject::new());
             }
             OpCode::CreateRegExp { result, reg_id } => {
                 let r = self.runtime.get_regex(reg_id);
                 self.r[result] = JObject::with_regex(r).into();
             }
-            OpCode::CreateTemplate { result, id, stack_offset } => {
+            OpCode::CreateTemplate {
+                result,
+                id,
+                stack_offset,
+            } => {
                 let stack = &mut self.stack[stack_offset as usize..];
 
                 self.r[result] = unsafe {
@@ -1202,50 +1853,41 @@ impl<'a> Interpreter<'a> {
                         false,
                     )
                 };
-            },
-            OpCode::CreateTaggedTemplate { result, id, stack_offset } => {
-                let stack = &mut self.stack[stack_offset as usize..];
-
-                self.r[result] = unsafe {
-                    operations::create_template(
-                        id.0,
-                        stack.as_mut_ptr(),
-                        self.arg_len as u32,
-                        true,
-                    )
-                };
-            },
+            }
 
             OpCode::CreateClass { result, class_id } => {
                 let class = self.runtime.get_class(class_id);
 
                 let obj = if self.is_global {
-                    class.create_object_without_capture()
+                    class.ect_without_capture()
                 } else {
-                    class.create_object_with_capture(
-                        self.capture_stack.as_mut().unwrap().as_mut_ptr(),
-                    )
+                    unsafe { class.ect_with_capture(self.cap.clone().unwrap()) }
                 };
 
                 self.r[result] = obj.into();
-            },
-            OpCode::ClassBindSuper { class, super_ } => {
+            }
+            OpCode::ClassBindSuper { class, super_ } => unsafe {
                 let super_class = self.r[super_];
                 let c = self.r[class];
-                let proto = c.get_property_str("prototype").unwrap();
-                let super_proto = super_class.get_property_str("prototype").unwrap();
-                proto.set_property_str("__proto__", super_proto).unwrap();
+                let proto = c.get_property(NAMES["prototype"], ctx).unwrap_unchecked();
+                let super_proto = match super_class.get_property(NAMES["prototype"], ctx) {
+                    Ok(v) => v,
+                    Err(e) => return Err(e),
+                };
+                match proto.set_property(NAMES["__proto__"], super_proto, ctx) {
+                    _ => {}
+                };
 
                 if !super_class.is_object() {
-                    return Res::Err(JValue::Error(Error::ClassExtendsNonCallable));
+                    return Err(JValue::from(Error::ClassExtendsNonCallable));
                 }
-                if c.is_object() {
-                    if let Some(c) = unsafe { c.value.object.as_class() } {
-                        c.super_ = Some(unsafe { super_class.value.object })
+                if let Some(obj) = c.as_object() {
+                    if let Some(c) = obj.as_class() {
+                        c.set_super(super_class.as_object().unwrap());
                     }
                 }
-            }
+            },
         };
-        Res::Ok
+        Ok(Res::Ok)
     }
 }

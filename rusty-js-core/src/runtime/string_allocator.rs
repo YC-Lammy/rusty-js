@@ -1,9 +1,42 @@
-use std::{alloc::Layout, marker::PhantomData};
+use std::collections::HashMap;
+use std::alloc::Layout;
 
-use crate::bultins::strings::JStringHeader;
+use crate::utils::nohasher::NoHasherBuilder;
+use crate::JSString;
 
-use super::GcFlag;
+#[derive(Default)]
+pub struct StringAllocator {
+    // already hashed, use the nohasher
+    indexes: HashMap<u64, usize, NoHasherBuilder>,
+    strings: Vec<Box<[u8]>>,
+}
 
+impl StringAllocator {
+    pub fn allocate(&mut self, s: &str) -> JSString {
+        let hash = fxhash::hash64(s);
+        if let Some(v) = self.indexes.get(&hash) {
+            return JSString((&self.strings[*v]).as_ptr() as *mut u8);
+        } else {
+            let len: [u8; 4] = (s.len() as u32).to_ne_bytes();
+            let data = unsafe {
+                let ptr = std::alloc::alloc(Layout::array::<u8>(s.len() + 4).unwrap());
+                *(ptr as *mut [u8; 4]) = len;
+                std::ptr::copy_nonoverlapping(s.as_ptr(), ptr.add(4), s.len());
+                let slice = std::slice::from_raw_parts_mut(ptr, s.len() + 4);
+                Box::from_raw(slice)
+            };
+            let ptr = data.as_ptr();
+            let idx = self.strings.len();
+            self.strings.push(data);
+            self.indexes.insert(hash, idx);
+            return JSString(ptr as *mut u8);
+        }
+    }
+
+    pub fn garbage_collect(&mut self) {}
+}
+
+/*
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
 struct LinkNode<const SIZE: usize> {
@@ -11,6 +44,7 @@ struct LinkNode<const SIZE: usize> {
     next: *mut LinkNode<SIZE>,
     mark: PhantomData<[(); SIZE]>,
 }
+
 
 pub struct StringAllocator {
     s64: *mut LinkNode<64>,
@@ -26,7 +60,7 @@ pub struct StringAllocator {
     s2048: *mut LinkNode<2048>,
     s2048_pages: Vec<&'static mut [[u8; 2048]]>,
 
-    sys: Vec<*mut JStringHeader>,
+    sys: Vec<*mut JSStringHeader>,
 }
 
 impl StringAllocator {
@@ -49,8 +83,8 @@ impl StringAllocator {
     }
 
     #[inline]
-    pub(crate) fn allocate(&mut self, size: usize) -> *mut JStringHeader {
-        let size = std::mem::size_of::<JStringHeader>() + size;
+    pub(crate) fn allocate(&mut self, size: usize) -> *mut JSStringHeader {
+        let size = std::mem::size_of::<JSStringHeader>() + size;
 
         (if size <= 8 {
             LinkNode::allocate(&mut self.s64, self) as *mut u8
@@ -69,13 +103,13 @@ impl StringAllocator {
             let v = unsafe { std::alloc::alloc(Layout::array::<u8>(size).unwrap()) };
             self.sys.push(v as _);
             v
-        }) as *mut JStringHeader
+        }) as *mut JSStringHeader
     }
 
     pub unsafe fn garbage_collect(&mut self) {
         for i in &self.s64_pages {
             for i in i.iter() {
-                let n = (i as *const _ as *mut LinkNode<64>).as_mut().unwrap();
+                let n = &mut *(i as *const _ as *mut LinkNode<64>);
                 if n.flag == GcFlag::NotUsed {
                     n.flag = GcFlag::Garbage;
                     let next = self.s64;
@@ -91,7 +125,7 @@ impl StringAllocator {
 
         for i in &self.s128_pages {
             for i in i.iter() {
-                let n = (i as *const _ as *mut LinkNode<128>).as_mut().unwrap();
+                let n = &mut *(i as *const _ as *mut LinkNode<128>);
                 if n.flag == GcFlag::NotUsed {
                     n.flag = GcFlag::Garbage;
                     let next = self.s128;
@@ -107,7 +141,7 @@ impl StringAllocator {
 
         for i in &self.s256_pages {
             for i in i.iter() {
-                let n = (i as *const _ as *mut LinkNode<256>).as_mut().unwrap();
+                let n = &mut *(i as *const _ as *mut LinkNode<256>);
                 if n.flag == GcFlag::NotUsed {
                     n.flag = GcFlag::Garbage;
                     let next = self.s256;
@@ -123,7 +157,7 @@ impl StringAllocator {
 
         for i in &self.s512_pages {
             for i in i.iter() {
-                let n = (i as *const _ as *mut LinkNode<512>).as_mut().unwrap();
+                let n = &mut *(i as *const _ as *mut LinkNode<512>);
                 if n.flag == GcFlag::NotUsed {
                     n.flag = GcFlag::Garbage;
                     let next = self.s512;
@@ -139,7 +173,7 @@ impl StringAllocator {
 
         for i in &self.s1024_pages {
             for i in i.iter() {
-                let n = (i as *const _ as *mut LinkNode<1024>).as_mut().unwrap();
+                let n = &mut *(i as *const _ as *mut LinkNode<1024>);
                 if n.flag == GcFlag::NotUsed {
                     n.flag = GcFlag::Garbage;
                     let next = self.s1024;
@@ -155,7 +189,7 @@ impl StringAllocator {
 
         for i in &self.s2048_pages {
             for i in i.iter() {
-                let n = (i as *const _ as *mut LinkNode<2048>).as_mut().unwrap();
+                let n = &mut *(i as *const _ as *mut LinkNode<2048>);
                 if n.flag == GcFlag::NotUsed {
                     n.flag = GcFlag::Garbage;
                     let next = self.s2048;
@@ -260,3 +294,4 @@ impl Default for StringAllocator {
         Self::new()
     }
 }
+*/

@@ -3,11 +3,13 @@ use std::sync::Arc;
 
 use crate::baseline;
 use crate::bytecodes::OpCode;
-use crate::runtime::Runtime;
+use crate::interpreter::{clousure, Interpreter};
+use crate::runtime::{Runtime, DEFAULT_STACK_SIZE};
 use crate::types::JValue;
+use crate::utils::string_interner::NAMES;
 
+use super::flag::PropFlag;
 use super::object::{JObject, JObjectValue};
-use super::prop::PropFlag;
 
 #[derive(Clone)]
 pub struct JSFunctionInstance {
@@ -18,7 +20,7 @@ pub struct JSFunctionInstance {
 
 impl JSFunctionInstance {
     pub fn call(
-        &self,
+        self: Arc<Self>,
         runtime: &Runtime,
         this: JValue,
         stack: *mut JValue,
@@ -26,37 +28,40 @@ impl JSFunctionInstance {
     ) -> (JValue, bool) {
         let this = if let Some(t) = self.this { t } else { this };
 
-        let mut need_drop: Option<CaptureStack> = None;
+        let re = JSFunction::call(
+            self.func.to_mut(),
+            runtime,
+            this,
+            stack,
+            argc,
+            self.capture_stack.clone(),
+        );
 
-        let capture_stack = match self.capture_stack {
-            CaptureStack::Allocated(a) => a.to_mut().as_data(),
+        match re {
+            Ok(v) => (v, false),
+            Err(e) => (e, true),
+        }
+    }
+
+    pub fn capture_stack(&self) -> Option<Arc<Box<[JValue]>>> {
+        match &self.capture_stack {
+            CaptureStack::Allocated(a) => Some(a.clone()),
             CaptureStack::NeedAlloc(n) => {
-                let inner = CaptureStackInner::alloc(n as usize);
-                inner.increment_count();
-                let ptr = inner.to_mut().as_data();
-                need_drop = Some(CaptureStack::Allocated(inner));
-                ptr
+                let data = unsafe {
+                    std::alloc::alloc_zeroed(Layout::array::<JValue>(*n as usize).unwrap())
+                } as *mut JValue;
+                let data = unsafe { std::slice::from_raw_parts_mut(data, *n as usize) };
+                let data = unsafe { Box::from_raw(data) };
+                Some(Arc::new(data))
             }
-            CaptureStack::None => &mut [],
-        };
-        let re = self.func.Call(runtime, this, stack, argc, capture_stack);
-        drop(need_drop);
-        return re;
+            CaptureStack::None => None,
+        }
     }
 
     pub unsafe fn trace(&self) {
         if let Some(v) = &self.this {
             v.trace();
         }
-
-        match &self.capture_stack {
-            CaptureStack::Allocated(a) => {
-                for i in a.as_data() {
-                    i.trace();
-                }
-            }
-            _ => {}
-        };
     }
 
     #[inline]
@@ -65,365 +70,242 @@ impl JSFunctionInstance {
         let obj = JObject::new();
         let proto = JObject::new();
 
-        proto.insert_property("constructor", obj.into(), PropFlag::BUILTIN);
+        proto.insert_property(NAMES["constructor"], obj.into(), PropFlag::BUILTIN);
 
         obj.insert_property(
-            "length",
-            JValue::Number(self.func.args_len() as f64),
+            NAMES["length"],
+            JValue::create_number(self.func.args_len as f64),
             PropFlag::CONFIGURABLE,
         );
-        obj.insert_property("name", JValue::String("".into()), PropFlag::CONFIGURABLE);
-        obj.insert_property("prototype", proto.into(), PropFlag::NONE);
         obj.insert_property(
-            "__proto__",
+            NAMES["name"],
+            JValue::create_static_string(""),
+            PropFlag::CONFIGURABLE,
+        );
+        obj.insert_property(NAMES["prototype"], proto.into(), PropFlag::NONE);
+        obj.insert_property(
+            NAMES["__proto__"],
             rt.prototypes.function.into(),
             Default::default(),
         );
 
-        obj.inner.to_mut().wrapped_value = JObjectValue::Function(self);
+        obj.inner.to_mut().wrapped_value = JObjectValue::Function(Arc::new(self));
         return obj;
     }
 }
 
 // todo: use garbage collect CaptureStack
+#[derive(Clone)]
 pub enum CaptureStack {
     NeedAlloc(u32),
-    Allocated(&'static CaptureStackInner),
+    Allocated(Arc<Box<[JValue]>>),
     None,
 }
 
+impl CaptureStack {
+    pub fn data(&self) -> Option<Arc<Box<[JValue]>>> {
+        match self {
+            CaptureStack::Allocated(a) => Some(a.clone()),
+            CaptureStack::NeedAlloc(n) => {
+                let data = unsafe {
+                    std::alloc::alloc_zeroed(Layout::array::<JValue>(*n as usize).unwrap())
+                } as *mut JValue;
+                let data = unsafe { std::slice::from_raw_parts_mut(data, *n as usize) };
+                let data = unsafe { Box::from_raw(data) };
+                Some(Arc::new(data))
+            }
+            CaptureStack::None => None,
+        }
+    }
+}
+
 #[repr(C)]
-pub struct CaptureStackInner {
-    rc: usize,
-    alloc: usize,
-}
-
-impl CaptureStackInner {
-    fn to_mut(&self) -> &mut Self {
-        unsafe { std::mem::transmute_copy(&self) }
-    }
-
-    fn alloc(size: usize) -> &'static mut CaptureStackInner {
-        let size = std::mem::size_of::<CaptureStackInner>() + size * std::mem::size_of::<JValue>();
-        let ptr = unsafe { std::alloc::alloc(Layout::array::<u8>(size).unwrap()) };
-        let ptr = unsafe { (ptr as *mut CaptureStackInner).as_mut().unwrap() };
-        *ptr = CaptureStackInner { rc: 0, alloc: size };
-
-        for i in ptr.as_data() {
-            *i = JValue::UNDEFINED;
-        }
-        return ptr;
-    }
-
-    fn as_data(&self) -> &'static mut [JValue] {
-        let ptr = unsafe { (self as *const Self).add(1) as *mut JValue };
-        let len =
-            (self.alloc - std::mem::size_of::<CaptureStackInner>()) / std::mem::size_of::<JValue>();
-        unsafe { std::slice::from_raw_parts_mut(ptr, len) }
-    }
-
-    fn from_data_ptr(ptr: *mut JValue) -> &'static mut Self {
-        unsafe { (ptr as *mut CaptureStackInner).sub(1).as_mut().unwrap() }
-    }
-
-    fn increment_count(&mut self) {
-        self.rc += 1;
-    }
-
-    fn decrement_count(&mut self) {
-        self.rc -= 1;
-    }
-}
-
-impl Clone for CaptureStack {
-    fn clone(&self) -> Self {
-        match self {
-            Self::NeedAlloc(size) => Self::NeedAlloc(*size),
-            Self::Allocated(a) => {
-                let c = unsafe { std::mem::transmute_copy::<_, &mut CaptureStackInner>(a) };
-                c.increment_count();
-                Self::Allocated(c)
-            }
-            Self::None => Self::None,
-        }
-    }
-}
-
-impl Drop for CaptureStack {
-    fn drop(&mut self) {
-        match self {
-            Self::Allocated(a) => {
-                a.to_mut().rc -= 1;
-                if a.rc == 0 {
-                    unsafe {
-                        std::alloc::dealloc(
-                            a.to_mut() as *mut CaptureStackInner as *mut u8,
-                            Layout::array::<u8>(a.alloc).unwrap(),
-                        )
-                    };
-                }
-            }
-            Self::NeedAlloc(_) => {}
-            Self::None => {}
-        }
-    }
-}
-
 #[derive(Clone, Copy)]
-pub struct JSFuncContext {
-    pub(crate) stack: *mut JValue,
+pub struct JSContext<'a> {
+    pub stack: *mut JValue,
+    pub runtime: &'a Runtime,
 }
 
-#[repr(u8)]
-pub enum JSFunction {
-    ByteCodes {
-        is_async: bool,
-        is_generator: bool,
-        var_count: u16,
-        args_len: u16,
+#[repr(C)]
+pub struct JSFunction {
+    pub is_async: bool,
+    pub is_generator: bool,
+    pub var_count: u16,
+    pub args_len: u16,
+    pub largest_stack_offset: u32,
 
-        call_count: u16,
-        capture_stack_size: Option<u16>,
-        bytecodes: Vec<OpCode>,
-    },
-    Baseline {
-        is_async: bool,
-        is_generator: bool,
-        var_count: u16,
-        args_len: u16,
+    pub call_count: u64,
+    pub capture_stack_size: Option<u16>,
 
-        call_count: u16,
-        capture_stack_size: Option<u16>,
-        func: Arc<baseline::Function>,
-        bytecodes: Vec<OpCode>,
-    },
+    pub bytecodes: Arc<Vec<OpCode>>,
 
-    Native(Arc<dyn Fn(&JSFuncContext, JValue, &[JValue]) -> Result<JValue, JValue>>),
+    pub baseline_clousure: Option<clousure::Clousure>,
+    pub baseline_jit: Option<Arc<baseline::Function>>,
 }
 
 impl JSFunction {
-    pub fn is_native(&self) -> bool {
-        match self {
-            Self::Native(_) => true,
-            _ => false,
-        }
-    }
-
-    fn capture_stack_size(&self) -> Option<u16> {
-        match self {
-            Self::Baseline {
-                capture_stack_size, ..
-            } => *capture_stack_size,
-            Self::Native(_) => None,
-            Self::ByteCodes {
-                capture_stack_size, ..
-            } => *capture_stack_size,
-        }
-    }
-
-    pub fn args_len(&self) -> usize {
-        match self {
-            Self::Baseline { args_len, .. } => *args_len as usize,
-            Self::ByteCodes { args_len, .. } => *args_len as usize,
-            Self::Native(_) => 0,
+    pub fn create_instance(self: Arc<Self>, this: Option<JValue>) -> JSFunctionInstance {
+        if let Some(n) = self.capture_stack_size {
+            let cap = if n == 0 {
+                CaptureStack::None
+            } else {
+                CaptureStack::NeedAlloc(n as u32)
+            };
+            return JSFunctionInstance {
+                capture_stack: cap,
+                this,
+                func: self,
+            };
+        } else {
+            return JSFunctionInstance {
+                capture_stack: CaptureStack::None,
+                this,
+                func: self,
+            };
         }
     }
 
     pub fn create_instance_with_capture(
         self: Arc<Self>,
         this: Option<JValue>,
-        capture_stack: *mut JValue,
+        capture_stack: CaptureStack,
     ) -> JSFunctionInstance {
-        let stack = CaptureStackInner::from_data_ptr(capture_stack);
-        stack.increment_count();
-        JSFunctionInstance {
-            capture_stack: CaptureStack::Allocated(stack),
+        return JSFunctionInstance {
+            capture_stack: capture_stack,
             this,
             func: self,
-        }
-    }
-
-    pub fn create_instance(self: Arc<Self>, this: Option<JValue>) -> JSFunctionInstance {
-        if self.is_native() {
-            return JSFunctionInstance {
-                capture_stack: CaptureStack::None,
-                this,
-                func: self,
-            };
-        } else {
-            if let Some(n) = self.capture_stack_size() {
-                return JSFunctionInstance {
-                    capture_stack: CaptureStack::NeedAlloc(n as u32),
-                    this,
-                    func: self,
-                };
-            } else {
-                panic!("create insrance on function that requires capture.")
-            }
-        }
+        };
     }
 
     fn to_mut(&self) -> &mut Self {
         unsafe { std::mem::transmute_copy(&self) }
     }
 
-    #[allow(non_snake_case)]
-    pub fn Call(
-        &self,
+    pub fn call(
+        &mut self,
         runtime: &Runtime,
         this: JValue,
         stack: *mut JValue,
         argc: usize,
-        capture_stack: &mut [JValue],
-    ) -> (JValue, bool) {
-        match self.to_mut() {
-            Self::ByteCodes {
-                is_async,
-                is_generator,
-                var_count,
-                args_len: _,
-                call_count,
-                capture_stack_size: _,
-                bytecodes,
-            } => {
-                if stack.is_null() {
-                    panic!()
-                }
+        capture_stack: CaptureStack,
+    ) -> Result<JValue, JValue> {
+        self.call_count += 1;
 
-                *call_count += 1;
+        if self.call_count == 10 {
+            self.compile(runtime);
+        } else if self.call_count == 100 {
+        } else if self.call_count == 10000 {
+        }
 
-                if !*is_async && !*is_generator {
-                    let size = unsafe { stack.add(argc).offset_from(runtime.stack.as_ptr()) };
-                    let size = runtime.stack.len() - size as usize;
-                    let stack_ =
-                        unsafe { std::slice::from_raw_parts_mut(stack.add(argc), size as usize) };
-                    let args = unsafe { std::slice::from_raw_parts(stack, argc) };
+        if !self.is_async && !self.is_generator {
 
-                    let mut intpr =
-                        crate::interpreter::Interpreter::function(runtime, stack_, capture_stack);
+            if let Some(f) = &self.baseline_jit {
+                /*
+                if argc < self.args_len as usize {
+                    let rargs = unsafe { stack.add(argc) };
+                    let s = unsafe {
+                        std::slice::from_raw_parts_mut(rargs, self.args_len as usize - argc)
+                    };
+                    s.fill(JValue::UNDEFINED);
+                    argc = self.args_len as usize;
+                };*/
 
-                    match intpr.run(this, args, &bytecodes) {
-                        Ok(v) => (v, false),
-                        Err(e) => (e, true),
-                    }
-                } else if *is_async && !*is_generator {
-                    let codes = bytecodes.clone();
-                    let var_count = *var_count;
+                let cd = capture_stack.data();
+                let cap = cd
+                    .and_then(|v| Some(v.as_ref().as_ref().as_ptr() as *mut JValue))
+                    .unwrap_or(std::ptr::null_mut());
 
-                    // make sure the CaptureStack live long enough
-                    let cap = CaptureStackInner::from_data_ptr(capture_stack.as_mut_ptr());
-                    cap.increment_count();
+                let mut counter = 0;
 
-                    let p = runtime.to_mut().call_async(move || {
-                        let oldstack = stack;
-                        let runtime = Runtime::current();
-                        let stack = runtime.to_mut().get_async_stack(var_count as usize);
+                let (v0, _v1, _v2, _v3, exit) = f.call(
+                    runtime,
+                    this,
+                    argc,
+                    stack,
+                    unsafe { stack.add(self.largest_stack_offset as usize + 1) },
+                    cap,
+                    &mut counter,
+                    JValue::UNDEFINED,
+                    JValue::UNDEFINED,
+                    JValue::UNDEFINED,
+                    JValue::UNDEFINED,
+                );
 
-                        unsafe { std::ptr::copy(oldstack, stack.as_mut_ptr(), argc) };
-
-                        let stack_ptr = stack.as_mut_ptr();
-                        let args = unsafe { std::slice::from_raw_parts(stack_ptr, argc) };
-
-                        let mut intpr = crate::interpreter::Interpreter::function(
-                            &runtime,
-                            &mut stack[argc..],
-                            cap.as_data(),
-                        );
-
-                        runtime.user_own_value(this);
-
-                        let re = intpr.run(this, args, &codes);
-
-                        runtime.user_drop_value(this);
-
-                        // release the capture stack
-                        cap.to_mut().decrement_count();
-
-                        return re;
-                    });
-
-                    (JObject::with_promise(p).into(), false)
+                if exit.is_error() {
+                    return Err(v0);
                 } else {
-                    todo!("generator function")
-                }
-            }
-
-            Self::Baseline {
-                is_async,
-                is_generator,
-                var_count,
-                args_len: _,
-                call_count,
-                capture_stack_size: _,
-                func,
-                bytecodes: _,
-            } => {
-                if stack.is_null() {
-                    panic!()
-                }
-
-                *call_count += 1;
-
-                if !*is_async && !*is_generator {
-                    func.call(runtime, this, argc, stack, capture_stack.as_mut_ptr())
-                } else if *is_async && !*is_generator {
-                    // make sure the CaptureStack live long enough
-                    let cap = CaptureStackInner::from_data_ptr(capture_stack.as_mut_ptr());
-                    cap.increment_count();
-
-                    let f = func.clone();
-                    let var_count = *var_count as usize;
-
-                    let p = runtime.to_mut().call_async(move || {
-                        let oldstack = stack;
-                        let runtime = Runtime::current();
-                        let stack = runtime.to_mut().get_async_stack(var_count);
-
-                        unsafe { std::ptr::copy(oldstack, stack.as_mut_ptr(), argc) };
-
-                        runtime.user_own_value(this);
-
-                        let re = f.call(
-                            &runtime,
-                            this,
-                            argc,
-                            stack.as_mut_ptr(),
-                            cap.as_data().as_mut_ptr(),
-                        );
-
-                        runtime.user_drop_value(this);
-
-                        // drop the capture stack
-                        cap.to_mut().decrement_count();
-
-                        if re.1 {
-                            return Err(re.0);
-                        } else {
-                            return Ok(re.0);
-                        }
-                    });
-
-                    return (JObject::with_promise(p).into(), false);
-                } else {
-                    todo!("generator function")
-                }
-            }
-
-            Self::Native(n) => {
-                // the stack pointer can be null
-
-                let args = unsafe { std::slice::from_raw_parts(stack as *const JValue, argc) };
-
-                let ctx = JSFuncContext {
-                    stack: unsafe { stack.add(argc) },
+                    return Ok(v0);
                 };
 
-                let re = (n)(&ctx, this, args);
-                match re {
-                    Ok(v) => (v, false),
-                    Err(v) => (v, true),
-                }
+            } else if let Some(c) = &mut self.baseline_clousure {
+                let stack = unsafe { std::slice::from_raw_parts_mut(stack, DEFAULT_STACK_SIZE) };
+                let op_stack = unsafe {
+                    std::slice::from_raw_parts_mut(
+                        stack
+                            .as_mut_ptr()
+                            .add(self.largest_stack_offset as usize + argc),
+                        DEFAULT_STACK_SIZE,
+                    )
+                };
+                let args = unsafe { std::slice::from_raw_parts_mut(stack.as_mut_ptr(), argc) };
+
+                let cd = capture_stack.data();
+                let cap = cd.as_ref().and_then(|v| Some(v.as_ref().as_ref()));
+                let cap = unsafe { std::mem::transmute_copy(&cap) };
+
+                c.run(
+                    runtime,
+                    &mut stack[argc..],
+                    op_stack,
+                    Some(capture_stack),
+                    cap,
+                    this,
+                    args,
+                )
+            } else {
+                let stack = unsafe { std::slice::from_raw_parts_mut(stack, DEFAULT_STACK_SIZE) };
+                let cd = capture_stack.data();
+                let cap = cd.as_ref().and_then(|v| Some(v.as_ref().as_ref()));
+                let cap = unsafe { std::mem::transmute_copy(&cap) };
+
+                let args = unsafe { std::slice::from_raw_parts_mut(stack.as_mut_ptr(), argc) };
+
+                let mut intpr = Interpreter::function(
+                    runtime,
+                    &mut stack[argc..],
+                    argc + self.largest_stack_offset as usize,
+                    capture_stack,
+                    cap,
+                );
+
+                intpr.run(this, args, &self.bytecodes)
             }
+        } else {
+            todo!()
+        }
+    }
+
+    fn compile(&mut self, rt: &Runtime) {
+        if self.baseline_jit.is_none() {
+            let ptr = &mut self.baseline_jit as *mut _ as usize;
+            let runtime = Runtime::current();
+            let bytecodes = self.bytecodes.clone();
+
+            rt.worker_task_sender.send(Box::new(move ||{
+                let ctx = unsafe { std::mem::transmute_copy(&&runtime.baseline_context) };
+                let module = unsafe { std::mem::transmute_copy(&&runtime.baseline_module) };
+                let engine = unsafe { std::mem::transmute_copy(&&runtime.baseline_engine) };
+                let mut codegen = baseline::llvm::CodeGen::new(
+                    ctx,
+                    module,
+                    engine,
+                );
+                let func = codegen.translate_codes(&bytecodes);
+
+                unsafe{
+                    (ptr as *mut Option<Arc<baseline::Function>>).write(Some(Arc::new(func)));
+                }
+            })).expect("failed to send task");
         }
     }
 }

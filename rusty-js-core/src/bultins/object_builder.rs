@@ -1,6 +1,6 @@
-use crate::{types::JValue, Runtime};
+use crate::{types::JValue, PropKey, Runtime, ToProperyKey};
 
-use super::{object::JObject, prop::PropFlag};
+use super::{flag::PropFlag, object::JObject};
 
 pub struct ObjectBuilder {
     fields: Vec<(String, JValue)>,
@@ -33,19 +33,19 @@ impl ObjectBuilder {
     pub fn build(&self) -> JObject {
         let runtime = Runtime::current();
 
-        let mut obj = JObject::new();
+        let obj = JObject::new();
         for (name, value) in &self.fields {
-            obj.insert_property(&name, *value, PropFlag::THREE);
+            obj.insert_property(name.to_key(&runtime), *value, PropFlag::THREE);
         }
 
         for (name, value) in &self.getters {
             let id = runtime.register_field_name(&name);
-            obj.bind_getter(id, *value);
+            obj.bind_getter(PropKey(id), *value);
         }
 
         for (name, value) in &self.setters {
             let id = runtime.register_field_name(&name);
-            obj.bind_setter(id, *value);
+            obj.bind_setter(PropKey(id), *value);
         }
 
         if self.prototype.is_some() {}

@@ -1,8 +1,7 @@
-use std::sync::Arc;
 
-use crate::bultins::function::{JSFuncContext, JSFunction};
 use crate::bultins::object::JObject;
-use crate::bultins::strings::JString;
+use crate::bultins::strings::JSString;
+use crate::error::Error;
 use crate::types::*;
 
 impl From<bool> for JValue {
@@ -17,49 +16,47 @@ impl From<bool> for JValue {
 
 impl From<f64> for JValue {
     fn from(v: f64) -> Self {
-        Self {
-            value: JValueUnion { number: v },
-            type_pointer: &JTypeVtable::NUMBER,
-        }
+        JValue::create_number(v)
     }
 }
 
-impl From<i64> for JValue {
-    fn from(v: i64) -> Self {
-        Self {
-            value: JValueUnion { bigint: v },
-            type_pointer: &JTypeVtable::BIGINT,
+macro_rules! from_numeric {
+    ($n:ty) => {
+        impl From<$n> for JValue {
+            fn from(v: $n) -> Self {
+                (v as f64).into()
+            }
         }
-    }
+    };
 }
+
+from_numeric!(i32);
+from_numeric!(i64);
+from_numeric!(isize);
+from_numeric!(u32);
+from_numeric!(u64);
+from_numeric!(usize);
 
 impl From<String> for JValue {
     fn from(s: String) -> Self {
-        Self::String(JString::from(s))
+        Self::create_string(s.into())
     }
 }
 
 impl From<JObject> for JValue {
     fn from(obj: JObject) -> Self {
-        JValue::Object(obj)
+        JValue::create_object(obj)
     }
 }
 
-impl From<JString> for JValue {
-    fn from(s: JString) -> Self {
-        Self::String(s)
+impl From<JSString> for JValue {
+    fn from(s: JSString) -> Self {
+        Self::create_string(s)
     }
 }
 
-pub trait Convert<T> {
-    fn convert(self) -> T;
-}
-
-impl<F> Convert<JSFunction> for F
-where
-    F: Fn(&JSFuncContext, JValue, &[JValue]) -> Result<JValue, JValue> + 'static,
-{
-    fn convert(self) -> JSFunction {
-        JSFunction::Native(Arc::new(self))
+impl From<Error> for JValue {
+    fn from(e: Error) -> Self {
+        JValue::UNDEFINED
     }
 }

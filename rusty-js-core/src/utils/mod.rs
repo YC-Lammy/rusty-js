@@ -1,7 +1,10 @@
+pub mod iterator;
 pub mod nohasher;
-pub mod string_interner;
-pub mod utf16;
 pub mod pointer_vec;
+pub mod string_interner;
+pub mod u16interner;
+pub mod utf16;
+pub mod hashtable;
 
 /// offset_of!(type, field); return memory offset of field in usize
 #[macro_export]

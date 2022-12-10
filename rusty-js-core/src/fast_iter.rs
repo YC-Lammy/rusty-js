@@ -1,18 +1,21 @@
+use std::sync::Arc;
+
 use crate::{
-    bultins::{object::JObject, prop::PropFlag},
+    bultins::{object::JObject, flag::PropFlag},
     bytecodes::LoopHint,
-    error::Error,
     runtime::Runtime,
     types::JValue,
+    utils::string_interner::SYMBOLS, JSContext,
 };
 
 pub enum FastIterator {
     Array {
-        array: Vec<(PropFlag, JValue)>,
+        array: Arc<Vec<(PropFlag, JValue)>>,
         count: u32,
     },
     Object {
         obj: JObject,
+        iter: Option<JObject>,
     },
     // for (... in obj)
     ForIn {
@@ -25,34 +28,33 @@ pub enum FastIterator {
 #[allow(unused)]
 impl FastIterator {
     #[inline]
-    pub unsafe fn new(iter: JValue, hint: LoopHint) -> &'static mut FastIterator {
+    pub unsafe fn new(iter: JValue, hint: LoopHint) -> Result<Self, JValue> {
         Box::leak(Box::new(if hint == LoopHint::ForIn {
-            if iter.is_object() {
-                let keys = iter.value.object.keys();
-                FastIterator::ForIn {
+            if let Some(obj) = iter.is_object() {
+                let keys = obj.keys();
+
+                Ok(FastIterator::ForIn {
                     keys: keys,
                     count: 0,
-                }
+                })
             } else {
-                FastIterator::Empty
+                Ok(FastIterator::Empty)
             }
         } else {
-            if iter.is_object() {
-                if iter.value.object.is_array() {
-                    FastIterator::Array {
-                        array: iter
-                            .value
-                            .object
-                            .inner
-                            .wrapped_value
-                            .array()
-                            .unwrap()
-                            .clone(),
+            if let Some(obj) = iter.as_object() {
+                if let Some(ar) = obj.as_arc_array() {
+                    Ok(
+                        FastIterator::Array {
+                        array: ar.clone(),
                         count: 0,
-                    }
+                    })
                 } else {
+                    let iter = iter.get_property_static(SYMBOLS["iterator"], std::ptr::null_mut())
+                        .unwrap();
+
                     FastIterator::Object {
                         obj: iter.value.object,
+                        iter: None,
                     }
                 }
             } else {
@@ -73,20 +75,20 @@ impl FastIterator {
                     (true, false, JValue::UNDEFINED)
                 }
             }
-            Self::Object { obj } => {
-                let next = match obj.get_property("next", stack) {
-                    Some(v) => v,
-                    None => {
-                        return (
-                            false,
-                            true,
-                            JValue::Error(Error::InvalideIterator { msg: "" }),
-                        )
-                    }
+            Self::Object { obj, iter } => {
+                let next = match iter.unwrap().get_property("next", JSContext{
+                    stack:stack,
+                    runtime:&Runtime::current(),
+                }) {
+                    Ok(v) => v,
+                    Err(e) => return (false, true, e),
                 };
 
                 match next.call(
-                    crate::bultins::function::JSFuncContext { stack: stack },
+                    &crate::bultins::function::JSContext {
+                        stack: stack,
+                        runtime: &Runtime::current(),
+                    },
                     this,
                     &[],
                 ) {
@@ -146,7 +148,7 @@ impl FastIterator {
         }
 
         let object = JObject::with_array(values);
-        (JValue::Object(object), false)
+        (JValue::create_object(object), false)
     }
 
     pub fn drop_(&'static mut self) {

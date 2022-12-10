@@ -1,58 +1,60 @@
-use std::alloc::Layout;
+use std::{alloc::Layout, sync::Arc};
 
-use crate::bultins::object::JObjectInner;
+use crate::{bultins::object::JObjectInner, Runtime};
 
 use super::gc::GcFlag;
 
 const OBJ_SIZE: usize = std::mem::size_of::<JObjectInner>();
 /// a page is 4096 bytes
 const PAGE_SIZE: usize = 4096;
-const OBJ_PER_PAGE: usize = (4096 as f64 / OBJ_SIZE as f64) as usize;
-
-#[repr(C)]
-#[derive(Debug, Clone, Copy)]
-struct LinkNode {
-    flag: GcFlag,
-    next: *mut LinkNode,
-}
+const OBJ_PER_PAGE: usize = (PAGE_SIZE as f64 / OBJ_SIZE as f64) as usize;
 
 pub struct ObjectAllocator {
-    pages: Vec<&'static [u8; 4096]>,
-    next: *mut LinkNode,
+    pages: Vec<Box<[JObjectInner; 128]>>,
+    next: Option<&'static JObjectInner>,
+    alloc_count: u16
 }
 
 impl ObjectAllocator {
-    pub unsafe fn allocate(&mut self) -> &'static mut JObjectInner {
-        if self.next.is_null() {
+    pub unsafe fn allocate(&mut self, runtime:Arc<Runtime>) -> &'static mut JObjectInner {
+        if self.next.is_none() {
             self.add_page(self.pages.len());
         };
-        let ptr = self.next;
-        self.next = (*ptr).next;
+        self.alloc_count += 1;
 
-        let ptr = ptr as *mut JObjectInner;
-        ptr.write(JObjectInner::default());
+        if self.alloc_count == 5000{
+            self.alloc_count = 0;
+            runtime.run_gc();
+        };
+        let ptr = &mut *(self.next.unwrap() as *const JObjectInner as *mut JObjectInner);
 
-        return ptr.as_mut().unwrap();
+        self.next = std::mem::transmute(ptr.__proto__);
+        ptr.__proto__ = None;
+        ptr.flag = GcFlag::Used;
+
+        return &mut *ptr;
     }
 
     unsafe fn add_page(&mut self, num: usize) {
-        let map = std::alloc::alloc(Layout::new::<[u8; 4096]>());
-        self.pages.push((map as *mut [u8; 4096]).as_mut().unwrap());
-
-        let mut p = self.pages.last_mut().unwrap().as_ptr() as *mut [JObjectInner; OBJ_PER_PAGE];
+        let mut map = std::alloc::alloc(Layout::array::<JObjectInner>(128 * num).unwrap())
+            as *mut JObjectInner;
+        self.pages.reserve(num);
 
         for _ in 0..num {
-            for i in 0..OBJ_PER_PAGE {
-                let obj = (p as *mut JObjectInner).add(i);
-                let node = obj as *mut JObjectInner as *mut LinkNode;
-                *node = LinkNode {
-                    flag: GcFlag::NotUsed,
-                    next: self.next,
-                };
-                self.next = node;
+            let ptr = map as *mut [JObjectInner; 128];
+            self.pages.push(Box::from_raw(ptr));
+            let slice = &mut *ptr;
+
+            for obj in slice {
+                (obj as *mut JObjectInner).write(JObjectInner::default());
+                obj.__proto__ = std::mem::transmute(self.next);
+                self.next = Some(obj);
             }
-            p = (p as *mut u8).add(4096) as *mut _;
+
+            map = map.add(128);
         }
+
+        //if self.pages.len()
     }
 
     pub fn garbage_collect(&mut self) {
@@ -63,17 +65,13 @@ impl ObjectAllocator {
 
             for obj in p.iter_mut() {
                 if obj.flag == GcFlag::NotUsed {
-                    let o = unsafe { std::ptr::read(obj) };
-                    drop(o);
+                    obj.flag = GcFlag::Garbage;
+                    obj.__proto__ = unsafe { std::mem::transmute(self.next) };
+                    obj.extensible = true;
+                    obj.values.clear();
+                    obj.wrapped_value = Default::default();
 
-                    let node = obj as *mut JObjectInner as *mut LinkNode;
-                    unsafe {
-                        *node = LinkNode {
-                            flag: GcFlag::Garbage,
-                            next: self.next,
-                        }
-                    };
-                    self.next = node;
+                    self.next = Some(obj);
                 } else if obj.flag == GcFlag::Old {
                     obj.flag = GcFlag::NotUsed;
                 } else if obj.flag == GcFlag::Used {
@@ -84,34 +82,14 @@ impl ObjectAllocator {
     }
 }
 
-impl Drop for ObjectAllocator {
-    fn drop(&mut self) {
-        for i in &mut self.pages {
-            let p = unsafe {
-                std::slice::from_raw_parts_mut(i.as_ptr() as *mut JObjectInner, OBJ_PER_PAGE)
-            };
-            for obj in p.iter_mut() {
-                if obj.flag != GcFlag::Garbage {
-                    unsafe { drop(std::ptr::read(obj)) };
-                }
-            }
-            unsafe { std::alloc::dealloc(i.as_ptr() as *mut u8, Layout::new::<[u8; 4096]>()) }
-        }
-    }
-}
-
 impl Default for ObjectAllocator {
     fn default() -> Self {
         let mut s = Self {
             pages: Vec::new(),
-            next: std::ptr::null_mut(),
+            next: None,
+            alloc_count:0,
         };
         unsafe { s.add_page(1) };
         s
     }
-}
-
-#[test]
-fn a() {
-    println!("{}", OBJ_SIZE);
 }

@@ -1,15 +1,31 @@
-use crate::bultins::prop::PropFlag;
-use crate::bultins::{self, JObject};
+use crate::bultins::flag::PropFlag;
+use crate::utils::string_interner::NAMES;
 use crate::Runtime;
 
-mod object;
+mod array;
+mod math;
 mod number;
+mod object;
 
 pub fn enable(runtime: &Runtime) {
-    let obj = object::create_object(runtime);
+    let obj = object::ect(runtime);
 
-    runtime.global_this.insert_property("Object", obj.into(), PropFlag::BUILTIN);
+    runtime
+        .global_this
+        .insert_property(NAMES["Object"], obj.into(), PropFlag::BUILTIN);
 
     let obj = number::creat_object(runtime);
-    runtime.global_this.insert_property_builtin("Number", obj.into());
+    runtime
+        .global_this
+        .insert_property_builtin(NAMES["Number"], obj.into());
+
+    let obj = array::init(runtime);
+    runtime
+        .global_this
+        .insert_property_builtin(NAMES["Array"], obj.into());
+
+    let obj = math::init(runtime);
+    runtime
+        .global_this
+        .insert_property_builtin(NAMES["Math"], obj.into());
 }

@@ -1,3 +1,6 @@
+use std::sync::Arc;
+use std::io::Write;
+
 use swc_common::FileName;
 use swc_common::SourceFile;
 
@@ -6,7 +9,7 @@ use crate::runtime::Runtime;
 use crate::types::JValue;
 
 mod bridge;
-
+mod llvm;
 
 macro_rules! debug {
     ($($arg:tt)*) => {
@@ -70,11 +73,12 @@ pub fn test_native_function() {
         a1.set(a1.get() + 1);
         // expected 9 and 0
         println!(
-            "{:#?},{:#?},{:#?},{:#?}",
-            args.get(0).map(|v| v.get_property_str("o")),
-            args.get(0).map(|v| v.get_property_str("p")),
+            "{:?},{:?},{:?},{:?},{:?}",
+            args.get(0).map(|v| v.get_property("o", ctx)),
+            args.get(0).map(|v| v.get_property("p", ctx)),
             args.get(1),
-            args.get(2)
+            args.get(2),
+            args.len()
         );
         println!("hello world!");
         Ok(JValue::UNDEFINED)
@@ -84,25 +88,10 @@ pub fn test_native_function() {
 
     let t = std::time::Instant::now();
     runtime
+        .clone()
         .execute(
             "hello_world",
-            r#"
-    function i(){
-        let a = hello;
-        if ((typeof a) == "bject"){
-            
-        } else{
-            return ()=>{a()}
-        }
-    }
-    let y = i();
-    y();
-    for (i=0;i<9;i++){
-        hello();
-    }
-    a = {p:0.09.toPrecision(8), o:"io"};
-    hello(a, 0, 9, ...[])
-    "#,
+            include_str!("../../bench/benchv8-v7/base.js"),
         )
         .map_err(|e| {
             match e {
@@ -115,8 +104,10 @@ pub fn test_native_function() {
             };
         })
         .unwrap();
-    println!("{}", t.elapsed().as_secs_f64()*1000.0);
+    println!("{}ms", t.elapsed().as_secs_f64() * 1000.0);
     println!("{}", a.get());
+
+    drop(runtime);
 }
 
 #[test]
@@ -125,9 +116,7 @@ fn test2() {
 
     runtime.clone().attach();
 
-    
-
-    let o = runtime.create_native_function(|ctx, this, args|{
+    let o = runtime.create_native_function(|_ctx, _this, args| {
         println!("{}", args[0].as_number_uncheck());
         Ok(JValue::UNDEFINED)
     });
@@ -139,8 +128,8 @@ fn test2() {
             "",
             r#"
     let i = 0;
-    let a = 9;
-    for (i=0;i<100000;i++){
+    var a = 9;
+    for (i=0;i<10000;i++){
         a += 1;
     };
     log(a);
@@ -148,5 +137,61 @@ fn test2() {
         )
         .unwrap();
 
-    println!("{} ms", t.elapsed().as_secs_f64()*1000.0);
+    println!("{} ms", t.elapsed().as_secs_f64() * 1000.0);
+}
+
+#[test]
+fn test3() {
+    let runtime = Runtime::new();
+
+    runtime.clone().attach();
+
+    let n = runtime.create_native_function(|_ctx, _this, _args| {
+        Ok(JValue::create_number(
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_millis() as f64,
+        ))
+    });
+
+    runtime.declare_let_variable("now", n.into());
+
+    let o = runtime.create_native_function(|_ctx, _this, args| {
+        let mut o = std::io::stdout();
+        o.write(args[0].to_string().as_bytes());
+        o.write(b"\n");
+        Ok(JValue::UNDEFINED)
+    });
+
+    runtime.declare_variable("log", o.into());
+
+    let t = std::time::Instant::now();
+    runtime.clone()
+        .execute(
+            "",
+            r#"
+
+            function p(n) {
+                for (let i = 2;i * i <= n;i++) {
+                    if (n % i == 0) {
+                        return false;
+                    }
+                }
+                return true;
+            }
+            
+            let sum = 0;
+            for (let k = 2;k < 100000;k++) {
+                if (p(k)){
+                    sum++;
+                }
+            }
+            log(sum)
+    "#,
+        )
+        .unwrap();
+
+    println!("{} ms", t.elapsed().as_secs_f64() * 1000.0);
+    Runtime::deattach();
 }

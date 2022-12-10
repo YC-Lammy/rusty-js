@@ -15,11 +15,11 @@ pub enum AsyncResult<T: 'static> {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct AsyncId(u64);
+pub struct AsyncId(pub(crate) usize);
 
 pub struct AsyncExecutor<T: 'static> {
-    jobs: HashMap<u64, AsyncState<T>>,
-    next_id: u64,
+    jobs: HashMap<usize, AsyncState<T>>,
+    next_id: usize,
 }
 
 thread_local! {

@@ -1,41 +1,78 @@
 use std::collections::hash_map::DefaultHasher;
 use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
+use std::ops::DerefMut;
 use std::sync::Arc;
 
+use parking_lot::RwLock;
+
 use crate::error::Error;
-use crate::runtime::GcFlag;
 use crate::runtime::Runtime;
+use crate::runtime::{GcFlag, ModuleId};
 use crate::types::JValue;
+use crate::{JSBigInt, JSContext};
 
 use crate::utils::nohasher::NoHasherBuilder;
+use crate::utils::string_interner::NAMES;
 
 use super::class::JSClassInstance;
 use super::function::JSFunctionInstance;
-use super::generator::Generator;
+use super::generator::JSGenerator;
 use super::object_builder::ObjectBuilder;
 use super::promise::Promise;
 use super::proxy::Proxy;
 use super::regex::RegExp;
-use super::strings::JString;
+use super::strings::JSString;
 use super::symbol::JSymbol;
 use super::typed_array::TypedArray;
 
-use super::prop::PropFlag;
+use super::flag::PropFlag;
 
 #[derive(Hash, Clone, Copy, PartialEq, Eq)]
 pub struct PropKey(pub(crate) u32);
 
-#[derive(Clone, Copy)]
-pub union PropCell {
-    value: JValue,
-    getter: JObject,
-    setter: JObject,
-
-    getsetter: (JObject, JObject),
+pub trait ToProperyKey {
+    fn to_key(&self, runtime: &Runtime) -> PropKey;
 }
 
-pub type PropMap = HashMap<PropKey, (PropFlag, PropCell), NoHasherBuilder>;
+impl ToProperyKey for PropKey {
+    fn to_key(&self, _runtime: &Runtime) -> PropKey {
+        return *self;
+    }
+}
+
+impl ToProperyKey for JValue {
+    fn to_key(&self, runtime: &Runtime) -> PropKey {
+        if let Some(s) = self.as_string() {
+            let id = runtime.register_field_name(s.as_ref());
+            return PropKey(id);
+        } else {
+            let s = self.to_string();
+            let id = runtime.register_field_name(&s);
+            return PropKey(id);
+        }
+    }
+}
+
+impl<S> ToProperyKey for S
+where
+    S: AsRef<str>,
+{
+    fn to_key(&self, runtime: &Runtime) -> PropKey {
+        let id = runtime.register_field_name(self.as_ref());
+        PropKey(id)
+    }
+}
+
+#[derive(Clone, Copy)]
+pub struct PropCell {
+    pub flag: PropFlag,
+    /// value acts as getter when flag has getter
+    pub value: JValue,
+    pub setter: JValue,
+}
+
+pub type PropMap = HashMap<PropKey, PropCell, NoHasherBuilder>;
 
 #[allow(unused)]
 /// helper function for hashing
@@ -46,6 +83,27 @@ where
     let mut h = DefaultHasher::new();
     v.hash(&mut h);
     h.finish()
+}
+
+pub trait CustomObject: std::any::Any {
+    fn get(&mut self, name: &str) -> Option<JValue>;
+    fn set(&mut self, name: &str, value: &JValue) -> bool;
+    fn own_properties(&self) -> &[&str];
+
+    #[allow(unused_variables)]
+    fn call(&mut self, this: &JValue, args: &[JValue]) -> Result<JValue, JValue> {
+        return Err(JValue::from(Error::CallOnNonFunction));
+    }
+}
+
+impl dyn CustomObject {
+    pub fn downcast_ref<T: 'static>(&self) -> Option<&T> {
+        if self.type_id() == std::any::TypeId::of::<T>() {
+            Some(unsafe { &*(self as *const dyn CustomObject as *const T) })
+        } else {
+            None
+        }
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -60,21 +118,10 @@ impl PartialEq for JObject {
     }
 }
 
-impl ToString for JObject {
-    fn to_string(&self) -> String {
-        if self.has_owned_property("toString") {}
-        if let Some(v) = self.as_error() {
-            return v.to_string();
-        }
-        return "[object Object]".to_string();
-    }
-}
-
 impl JObject {
     pub fn new() -> Self {
-        Self {
-            inner: JObjectInner::new(),
-        }
+        let rt = Runtime::current();
+        rt.create_object()
     }
 
     pub fn new_target() -> Self {
@@ -83,24 +130,70 @@ impl JObject {
         return obj;
     }
 
+    pub fn is_extensible(&self) -> bool {
+        self.inner.extensible
+    }
+
     pub fn is_new_target(&self) -> bool {
-        match self.inner.wrapped_value {
+        match &self.inner.wrapped_value {
             JObjectValue::NewTarget => true,
             _ => false,
         }
+    }
+
+    pub fn from_custom_object(obj: Arc<dyn CustomObject>) -> JObject {
+        let rt = Runtime::current();
+        let inner = rt.allocate_obj();
+        inner.__proto__ = Some(rt.prototypes.array);
+        inner.wrapped_value = JObjectValue::CustomObject(obj);
+
+        return JObject { inner: inner };
+    }
+
+    pub fn as_custom_object<'a>(&'a self) -> Option<&'a Arc<dyn CustomObject>> {
+        match &self.inner.wrapped_value {
+            JObjectValue::CustomObject(c) => Some(c),
+            _ => None,
+        }
+    }
+
+    pub fn bind_custom_object(&self, obj: Arc<dyn CustomObject>) {
+        self.inner.to_mut().wrapped_value = JObjectValue::CustomObject(obj)
+    }
+
+    pub fn is_custom_object(&self) -> bool {
+        self.as_custom_object().is_some()
     }
 
     pub fn array() -> Self {
         let rt = Runtime::current();
         let inner = rt.allocate_obj();
         inner.__proto__ = Some(rt.prototypes.array);
-        inner.wrapped_value = JObjectValue::Array(Vec::new());
+        inner.wrapped_value = JObjectValue::Array(Arc::new(Vec::new()));
+        let obj = JObject { inner };
+        obj.insert_property(
+            NAMES["length"],
+            JValue::create_number(0.0),
+            PropFlag::WRITABLE,
+        );
 
-        return JObject { inner: inner }
+        return JObject { inner: inner };
     }
 
     pub fn with_array(a: Vec<(PropFlag, JValue)>) -> Self {
-        Self::with_value(JObjectValue::Array(a))
+        let len = a.len();
+        let rt = Runtime::current();
+        let inner = rt.allocate_obj();
+        inner.__proto__ = Some(rt.prototypes.array);
+        inner.wrapped_value = JObjectValue::Array(Arc::new(a));
+        let obj = JObject { inner: inner };
+        obj.insert_property(
+            NAMES["length"],
+            JValue::create_number(len as f64),
+            PropFlag::WRITABLE,
+        );
+
+        return JObject { inner: inner };
     }
 
     pub fn new_map() -> Self {
@@ -125,35 +218,66 @@ impl JObject {
     }
 
     pub fn with_error(e: Error) -> Self {
-        let obj = JObjectInner::new();
-        obj.wrapped_value = JObjectValue::Error(e);
-        Self { inner: obj }
+        let rt = Runtime::current();
+        let inner = rt.allocate_obj();
+        inner.__proto__ = Some(rt.prototypes.error);
+        inner.wrapped_value = JObjectValue::Error(Box::new(e));
+
+        return JObject { inner: inner };
     }
 
     pub fn with_promise(p: Promise) -> Self {
-        Self::with_value(JObjectValue::Promise(p))
+        let rt = Runtime::current();
+        let inner = rt.allocate_obj();
+        inner.__proto__ = Some(rt.prototypes.promise);
+        inner.wrapped_value = JObjectValue::Promise(Box::new(p));
+
+        return JObject { inner: inner };
     }
 
-    pub fn with_regex(r: Arc<RegExp>) -> Self {
-        Self::with_value(JObjectValue::Regex(r))
+    pub fn with_regex(r: Box<RegExp>) -> Self {
+        let rt = Runtime::current();
+        let inner = rt.allocate_obj();
+        inner.__proto__ = Some(rt.prototypes.regex);
+        inner.wrapped_value = JObjectValue::Regex(r);
+
+        return JObject { inner: inner };
     }
 
     pub fn with_number(n: f64) -> Self {
-        Self::with_value(JObjectValue::Number(n))
+        let rt = Runtime::current();
+        let inner = rt.allocate_obj();
+        inner.__proto__ = Some(rt.prototypes.number);
+        inner.wrapped_value = JObjectValue::Number(n);
+
+        return JObject { inner: inner };
+    }
+
+    pub fn with_module(id: ModuleId) -> Self {
+        Self::with_value(JObjectValue::Module(id))
     }
 
     /// with value is private
     fn with_value(value: JObjectValue) -> Self {
-        let obj = JObjectInner::new();
-        obj.wrapped_value = value;
-        Self { inner: obj }
+        let obj = JObject::new();
+        obj.inner.to_mut().wrapped_value = value;
+        obj
     }
 
     pub fn set_inner(&self, value: JObjectValue) {
         self.inner.to_mut().wrapped_value = value;
     }
 
-    pub fn as_array(&self) -> Option<&mut Vec<(PropFlag, JValue)>> {
+    pub fn as_array<'a>(&'a self) -> Option<&'a mut Vec<(PropFlag, JValue)>> {
+        match &mut self.inner.to_mut().wrapped_value {
+            JObjectValue::Array(a) => {
+                Some(unsafe { &mut *(a.as_ref() as *const Vec<_> as *mut Vec<_>) })
+            }
+            _ => None,
+        }
+    }
+
+    pub fn as_arc_array<'a>(&'a self) -> Option<&'a mut Arc<Vec<(PropFlag, JValue)>>> {
         match &mut self.inner.to_mut().wrapped_value {
             JObjectValue::Array(a) => Some(a),
             _ => None,
@@ -164,9 +288,9 @@ impl JObject {
         self.inner.wrapped_value.is_array()
     }
 
-    pub fn as_function_instance(&self) -> Option<&mut JSFunctionInstance> {
-        match &mut self.inner.to_mut().wrapped_value {
-            JObjectValue::Function(f) => Some(f),
+    pub fn as_function_instance<'a>(&'a self) -> Option<&'a JSFunctionInstance> {
+        match &self.inner.wrapped_value {
+            JObjectValue::Function(f) => Some(f.as_ref()),
             _ => None,
         }
     }
@@ -175,9 +299,22 @@ impl JObject {
         self.as_function_instance().is_some()
     }
 
-    pub fn as_regexp(&self) -> Option<Arc<RegExp>> {
+    pub fn as_native_function(
+        &self,
+    ) -> Option<&Arc<RwLock<dyn Fn(JSContext, JValue, &[JValue]) -> Result<JValue, JValue>>>> {
+        match &self.inner.wrapped_value {
+            JObjectValue::NativeFunction(f) => Some(f),
+            _ => None,
+        }
+    }
+
+    pub fn is_native_function(&self) -> bool {
+        self.as_native_function().is_some()
+    }
+
+    pub fn as_regexp(&self) -> Option<&mut RegExp> {
         match &mut self.inner.to_mut().wrapped_value {
-            JObjectValue::Regex(r) => Some(r.clone()),
+            JObjectValue::Regex(r) => Some(r),
             _ => None,
         }
     }
@@ -219,9 +356,9 @@ impl JObject {
         self.as_number().is_some()
     }
 
-    pub fn as_class(&self) -> Option<&mut JSClassInstance> {
-        match &mut self.inner.to_mut().wrapped_value {
-            JObjectValue::Class(c) => Some(c),
+    pub fn as_class<'a>(&'a self) -> Option<&'a JSClassInstance> {
+        match &self.inner.wrapped_value {
+            JObjectValue::Class(c) => Some(c.as_ref()),
             _ => None,
         }
     }
@@ -237,98 +374,228 @@ impl JObject {
         None
     }
 
-    pub fn has_owned_property(&self, key: &str) -> bool {
-        self.inner.has_owned_property(key)
+    pub fn has_owned_property(&self, key: PropKey) -> bool {
+        self.inner.values.contains_key(&key)
+    }
+
+    pub fn has_property(&self, key: PropKey) -> bool {
+        if self.has_owned_property(key) {
+            return true;
+        } else {
+            todo!()
+        }
+    }
+
+    pub fn has_property_static(&self, key: u32) -> bool {
+        if self.inner.has_owned_property_static(key) {
+            return true;
+        } else {
+            todo!()
+        }
     }
 
     pub fn has_owned_property_static(&self, key: u32) -> bool {
         self.inner.has_owned_property_static(key)
     }
 
-    pub fn get_property(&self, key: &str, stack: *mut JValue) -> Option<JValue> {
-        self.inner.get(key, stack)
-    }
-
-    pub fn get_property_static(&self, key_id: u32, stack: *mut JValue) -> Option<JValue> {
-        let (v, error) = unsafe { self.inner.get_property_static(key_id, stack) };
-        if error {
-            None
-        } else {
-            if v.is_undefined() {
-                None
-            } else {
-                Some(v)
+    pub fn has_owned_setter(&self, key: PropKey) -> bool {
+        if let Some(cell) = self.inner.values.get(&key) {
+            if cell.flag.is_setter() {
+                return true;
             }
         }
+        return false;
+    }
+
+    pub fn remove_property(&self, key: PropKey) {
+        self.inner.to_mut().values.remove(&key);
+    }
+
+    pub fn get_property<K>(&self, key: K, ctx: JSContext) -> Result<JValue, JValue>
+    where
+        K: ToProperyKey,
+    {
+        let key = key.to_key(&ctx.runtime);
+
+        if key == NAMES["__proto__"] {
+            if let Some(obj) = self.inner.__proto__ {
+                return Ok(JValue::create_object(obj));
+            } else {
+                return Ok(JValue::NULL);
+            }
+        }
+
+        match self.inner.to_mut().wrapped_value.get_property(key.0) {
+            Some(v) => return Ok(v),
+            None => {}
+        };
+
+        if let Some(cell) = self.inner.values.get(&key) {
+            if !cell.flag.is_getter() && !cell.flag.is_setter() {
+                // a data property
+                return Ok(cell.value);
+            }
+
+            if cell.flag.is_getter() {
+                let this = JValue::create_object(*self);
+
+                return cell.value.call(this, &[], ctx);
+            } else if cell.flag.is_setter() {
+                return Ok(JValue::UNDEFINED);
+            }
+        };
+
+        let mut proto = self.inner.__proto__;
+        // loop through the prototypes to find the property
+
+        loop {
+            if let Some(p) = proto {
+                if let Some(cell) = p.inner.values.get(&key) {
+                    if !cell.flag.is_getter() && !cell.flag.is_setter() {
+                        // a data property
+                        return Ok(cell.value);
+                    }
+
+                    if cell.flag.is_getter() {
+                        let this = JValue::create_object(p);
+
+                        return cell.value.call(this, &[], ctx);
+                    } else if cell.flag.is_setter() {
+                        return Ok(JValue::UNDEFINED);
+                    }
+                } else {
+                    proto = p.inner.__proto__;
+                };
+            } else {
+                break;
+            }
+        }
+        Ok(JValue::UNDEFINED)
     }
 
     #[inline]
-    pub fn insert_property(&self, key: &str, value: JValue, flag: PropFlag) {
-        self.inner.to_mut().insert_property(key, value, flag)
+    pub fn insert_property(&self, key: PropKey, value: JValue, flag: PropFlag) {
+        if key == NAMES["__proto__"] {
+            if let Some(obj) = value.as_object() {
+                self.inner.to_mut().__proto__ = Some(obj);
+            }
+        }
+        self.inner.to_mut().values.insert(
+            key,
+            PropCell {
+                flag,
+                value,
+                setter: JValue::UNDEFINED,
+            },
+        );
     }
 
-    pub fn insert_property_static(&self, key: u32, value: JValue, flag: PropFlag) {
-        self.inner.to_mut().insert_property_static(key, value, flag)
-    }
-
-    pub(crate) fn insert_property_builtin(&self, key: &str, value: JValue) {
+    pub fn insert_property_builtin(&self, key: PropKey, value: JValue) {
         self.insert_property(key, value, PropFlag::BUILTIN)
     }
 
-    pub fn set_property_static(&self, key_id: u32, value: JValue, stack: *mut JValue) {
-        unsafe {
-            self.inner
-                .to_mut()
-                .set_property_static(key_id, value, stack)
+    pub fn set_property<K: ToProperyKey>(
+        &self,
+        key: K,
+        value: JValue,
+        ctx: JSContext,
+    ) -> Result<(), JValue> {
+        let key = key.to_key(ctx.runtime);
+        if key == NAMES["__proto__"] {
+            if let Some(obj) = value.as_object() {
+                self.inner.to_mut().__proto__ = Some(obj);
+            } else if value.is_null() {
+                self.inner.to_mut().__proto__ = None;
+            }
+            return Ok(());
         };
+
+        if let Some(cell) = self.inner.to_mut().values.get_mut(&key) {
+            if cell.flag.is_setter() {
+                let this = JValue::create_object(*self);
+
+                cell.setter.call(this, &[value], ctx)?;
+                return Ok(());
+            } else if cell.flag.is_getter() {
+                // do nothing
+            } else {
+                if cell.flag.is_writable() {
+                    cell.value = value;
+                }
+            };
+        } else {
+            // loop through the parents and find a setter
+            let mut parent = self.inner.__proto__;
+            loop {
+                if let Some(p) = parent {
+                    if p.has_owned_setter(key) {
+                        return p.set_property(key, value, ctx);
+                    } else {
+                        parent = p.inner.__proto__;
+                    };
+                } else {
+                    break;
+                }
+            }
+
+            // return error if not extendable
+            if !self.inner.extensible {
+                let n = ctx.runtime.get_field_name(key.0);
+                return Err(JValue::from(Error::TypeError(format!(
+                    "Cannot add property {}, object is not extensible",
+                    n
+                ))));
+            };
+
+            self.inner.to_mut().values.insert(
+                key,
+                PropCell {
+                    flag: PropFlag::THREE,
+                    value: value,
+                    setter: JValue::UNDEFINED,
+                },
+            );
+        }
+
+        Ok(())
     }
 
-    pub fn bind_getter(&self, id: u32, getter: JObject) {
-        if let Some((flag, cell)) = self.inner.to_mut().values.get_mut(&PropKey(id)) {
-            if flag.is_getter() && flag.is_setter() {
-                *cell = PropCell {
-                    getsetter: (getter, unsafe { cell.getsetter.1 }),
-                };
-            } else if flag.is_setter() {
-                *cell = PropCell {
-                    getsetter: (getter, unsafe { cell.setter }),
-                };
+    pub fn bind_getter(&self, key: PropKey, getter: JObject) {
+        if let Some(cell) = self.inner.to_mut().values.get_mut(&key) {
+            if cell.flag.is_getter() || cell.flag.is_setter() {
+                cell.value = getter.into();
             } else {
-                *cell = PropCell { getter: getter };
+                cell.value = getter.into();
+                cell.flag = cell.flag | PropFlag::GETTER;
             };
-            *flag = *flag | PropFlag::GETTER;
         } else {
             self.inner.to_mut().values.insert(
-                PropKey(id),
-                (
-                    PropFlag::GETTER | PropFlag::THREE,
-                    PropCell { getter: getter },
-                ),
+                key,
+                PropCell {
+                    flag: PropFlag::THREE | PropFlag::GETTER,
+                    value: getter.into(),
+                    setter: JValue::UNDEFINED,
+                },
             );
         }
     }
 
-    pub fn bind_setter(&self, id: u32, setter: JObject) {
-        if let Some((flag, cell)) = self.inner.to_mut().values.get_mut(&PropKey(id)) {
-            if flag.is_getter() && flag.is_setter() {
-                *cell = PropCell {
-                    getsetter: (unsafe { cell.getsetter.0 }, setter),
-                };
-            } else if flag.is_getter() {
-                *cell = PropCell {
-                    getsetter: (unsafe { cell.getter }, setter),
-                };
+    pub fn bind_setter(&self, key: PropKey, setter: JObject) {
+        if let Some(cell) = self.inner.to_mut().values.get_mut(&key) {
+            if cell.flag.is_getter() || cell.flag.is_setter() {
+                cell.setter = setter.into();
             } else {
-                *cell = PropCell { setter: setter };
+                cell.setter = setter.into();
+                cell.flag = cell.flag | PropFlag::SETTER;
             };
-            *flag = *flag | PropFlag::SETTER;
         } else {
             self.inner.to_mut().values.insert(
-                PropKey(id),
-                (
-                    PropFlag::SETTER | PropFlag::THREE,
-                    PropCell { setter: setter },
-                ),
+                key,
+                PropCell {
+                    flag: PropFlag::THREE | PropFlag::SETTER,
+                    value: JValue::UNDEFINED,
+                    setter: setter.into(),
+                },
             );
         }
     }
@@ -339,9 +606,34 @@ impl JObject {
         runtime: &Runtime,
         this: JValue,
         stack: *mut JValue,
-        argc: u32,
+        argc: usize,
     ) -> (JValue, bool) {
-        self.inner.call(runtime, this, stack, argc as usize)
+        if let Some(func) = self.inner.wrapped_value.function() {
+            return func.clone().call(runtime, this, stack, argc);
+        }
+
+        if let Some(c) = self.inner.wrapped_value.class() {
+            return c.call(runtime, (*self).into(), this, stack, argc);
+        }
+
+        if let Some(f) = self.as_native_function() {
+            let mut guard = f.write();
+            let args = unsafe { std::slice::from_raw_parts(stack, argc) };
+            let re = (guard.deref_mut())(
+                JSContext {
+                    stack: unsafe { stack.add(argc) },
+                    runtime,
+                },
+                this,
+                args,
+            );
+            match re {
+                Ok(v) => return (v, false),
+                Err(e) => return (e, true),
+            }
+        };
+
+        return (JValue::from(Error::CallOnNonFunction), true);
     }
 
     pub fn keys(&self) -> &'static [u32] {
@@ -353,32 +645,23 @@ impl JObject {
     }
 
     pub fn deep_clone(&self) -> JObject {
-        let obj = JObjectInner::new();
-        *obj = self.inner.clone();
-        JObject { inner: obj }
+        let obj = JObject::new();
+        *obj.inner.to_mut() = self.inner.clone();
+        obj
     }
 
     #[inline]
     pub unsafe fn trace(self) {
-        if self.inner.flag == GcFlag::Garbage{
+        if self.inner.flag == GcFlag::Garbage {
             return;
         }
         if self.inner.flag == GcFlag::Used {
             return;
         }
         self.inner.to_mut().flag = GcFlag::Used;
-        for (flag, cell) in self.inner.values.values() {
-            if flag.is_getter() && flag.is_setter() {
-                let (g, s) = cell.getsetter;
-                g.trace();
-                s.trace();
-            } else if flag.is_getter() {
-                cell.getter.trace()
-            } else if flag.is_setter() {
-                cell.setter.trace()
-            } else {
-                cell.value.trace()
-            }
+        for cell in self.inner.values.values() {
+            cell.value.trace();
+            cell.setter.trace();
         }
 
         if let Some(p) = &self.inner.__proto__ {
@@ -404,13 +687,17 @@ impl From<&'static mut JObjectInner> for JObject {
 #[derive(Clone)]
 #[repr(C)]
 pub struct JObjectInner {
+    // 1 byte
     pub(crate) flag: GcFlag,
 
+    // this field serves as prototype of the object and the chained list in allocater
+    pub(crate) __proto__: Option<JObject>,
+
+    // 1 byte
     pub(crate) extensible: bool,
 
+    // 48 bytes
     pub(crate) values: PropMap,
-
-    pub(crate) __proto__: Option<JObject>,
 
     pub(crate) wrapped_value: JObjectValue,
 }
@@ -419,6 +706,7 @@ impl Default for JObjectInner {
     fn default() -> Self {
         JObjectInner {
             flag: GcFlag::Used,
+            //next_obj: 0 as _,
             extensible: true,
             values: Default::default(),
             __proto__: None,
@@ -428,269 +716,17 @@ impl Default for JObjectInner {
 }
 
 impl JObjectInner {
-    #[inline]
-    pub fn new() -> &'static mut JObjectInner {
-        let runtime = Runtime::current();
-        runtime.allocate_obj()
-    }
-
-    pub fn has_owned_property(&self, key: &str) -> bool {
-        //let r = hash_(key);
-        let runtime = Runtime::current();
-        let r = runtime.register_field_name(key);
-
-        self.values.contains_key(&PropKey(r))
-    }
 
     pub fn has_owned_property_static(&self, key: u32) -> bool {
         self.values.contains_key(&PropKey(key))
-    }
-
-    #[inline]
-    pub fn get(&'static self, key: &str, stack: *mut JValue) -> Option<JValue> {
-        let (v, err) = self.get_property(key, stack);
-        if err {
-            None
-        } else {
-            if v.is_undefined() {
-                None
-            } else {
-                Some(v)
-            }
-        }
-    }
-
-    #[inline]
-    pub fn get_static(&'static self, key: u32, stack: *mut JValue) -> (JValue, bool) {
-        unsafe { self.get_property_static(key, stack) }
-    }
-
-    #[inline]
-    pub fn set_static(
-        &'static self,
-        key: u32,
-        value: JValue,
-        stack: *mut JValue,
-    ) -> (JValue, bool) {
-        unsafe { self.to_mut().set_property_static(key, value, stack) }
-    }
-
-    #[inline]
-    pub fn get_property(&'static self, key: &str, stack: *mut JValue) -> (JValue, bool) {
-        if key == "__proto__" {
-            if let Some(obj) = self.__proto__ {
-                return (JValue::Object(obj), false);
-            } else {
-                return (JValue::NULL, false);
-            }
-        }
-        //let r = hash_(key);
-        let runtime = Runtime::current();
-        let r = runtime.register_field_name(key);
-
-        unsafe { self.get_property_static(r, stack) }
-    }
-
-    #[inline]
-    pub unsafe fn get_property_static(
-        &'static self,
-        key: u32,
-        stack: *mut JValue,
-    ) -> (JValue, bool) {
-        if let Some((f, v)) = self.values.get(&PropKey(key)) {
-            if !f.is_getter() && !f.is_setter() {
-                // a data property
-                return (v.value, false);
-            }
-
-            if f.is_getter() && f.is_setter() {
-                let this = JValue::Object(JObject { inner: self });
-                let runtime = Runtime::current();
-
-                let (re, error) = v.getsetter.0.inner.call(&runtime, this, stack, 0);
-                if error {
-                    return (re, true);
-                }
-            } else if f.is_getter() {
-                let this = JValue::Object(JObject { inner: self });
-                let runtime = Runtime::current();
-
-                let (re, error) = v.getter.inner.call(&runtime, this, stack, 0);
-                if error {
-                    return (re, true);
-                }
-            } else if f.is_setter() {
-                return (JValue::UNDEFINED, false);
-            }
-        }
-        (JValue::UNDEFINED, false)
-    }
-
-    #[inline]
-    pub fn insert_property(&mut self, key: &str, value: JValue, flag: PropFlag) {
-        //let r = hash_(key);
-
-        match key {
-            "__proto__" => {
-                if value.is_object() {
-                    self.__proto__ = Some(unsafe { value.value.object });
-                } else if value.is_null() {
-                    self.__proto__ = None;
-                }
-                return;
-            }
-
-            _ => {}
-        };
-
-        let runtime = Runtime::current();
-        let r = runtime.register_field_name(key);
-
-        self.values
-            .insert(PropKey(r), (flag, PropCell { value: value }));
-    }
-
-    #[inline]
-    pub fn insert_property_static(&mut self, key: u32, value: JValue, flag: PropFlag) {
-        self.values
-            .insert(PropKey(key), (flag, PropCell { value: value }));
-    }
-
-    #[inline]
-    pub fn set_property(
-        &'static mut self,
-        key: &str,
-        value: JValue,
-        stack: *mut JValue,
-    ) -> (JValue, bool) {
-        match key {
-            "__proto__" => {
-                if value.is_object() {
-                    self.__proto__ = Some(unsafe { value.value.object });
-                } else if value.is_null() {
-                    self.__proto__ = None;
-                }
-                return (JValue::UNDEFINED, false);
-            }
-
-            _ => {}
-        };
-
-        //let r = hash_(key);
-        let runtime = Runtime::current();
-        let r = runtime.register_field_name(key);
-
-        unsafe { self.set_property_static(r, value, stack) }
-    }
-
-    #[inline]
-    pub unsafe fn set_property_static(
-        &'static mut self,
-        key: u32,
-        value: JValue,
-        stack: *mut JValue,
-    ) -> (JValue, bool) {
-        let i = (self as *mut Self as *const Self).as_ref().unwrap();
-
-        if let Some((f, v)) = self.values.get_mut(&PropKey(key)) {
-            if f.is_setter() && f.is_getter() {
-                let this = JValue::Object(JObject { inner: i });
-                let runtime = Runtime::current();
-
-                *stack = value;
-
-                let (re, error) = v.getsetter.1.inner.call(&runtime, this, stack, 1);
-                if error {
-                    return (re, true);
-                }
-            } else if f.is_setter() {
-                let this = JValue::Object(JObject { inner: i });
-                let runtime = Runtime::current();
-
-                *stack = value;
-
-                let (re, error) = v.setter.inner.call(&runtime, this, stack, 1);
-                if error {
-                    return (re, true);
-                }
-            } else if f.is_getter() {
-            } else {
-                if f.is_writable() {
-                    *v = PropCell { value: value };
-                }
-            };
-        } else {
-            if !self.extensible {
-                let rt = Runtime::current();
-                let n = rt.get_field_name(key);
-                return (
-                    JValue::Error(Error::TypeError(format!(
-                        "Cannot add property {}, object is not extensible",
-                        n
-                    ))),
-                    true,
-                );
-            }
-
-            self.values
-                .insert(PropKey(key), (PropFlag::THREE, PropCell { value: value }));
-        }
-
-        (JValue::UNDEFINED, false)
     }
 
     pub fn remove_key_static(&'static mut self, key: u32) {
         self.values.remove(&PropKey(key));
     }
 
-    pub fn get_own_property_descriptors(&self) -> PropMap {
-        let mut h = PropMap::default();
-
-        for (hashing, (flag, value)) in &self.values {
-            if !flag.is_getter() && !flag.is_setter() {
-                let o = ObjectBuilder::new()
-                    .field("enumerable", flag.is_enumerable())
-                    .field("writable", flag.is_writable())
-                    .field("configurable", flag.is_configurable())
-                    .field("value", unsafe { value.value })
-                    .build();
-
-                h.insert(
-                    *hashing,
-                    (
-                        PropFlag::THREE,
-                        PropCell {
-                            value: JValue::Object(o),
-                        },
-                    ),
-                );
-            }
-        }
-        return h;
-    }
-
-    /// this function handles function call and new call
-    #[inline]
-    pub fn call(
-        &'static self,
-        runtime: &Runtime,
-        this: JValue,
-        stack: *mut JValue,
-        argc: usize,
-    ) -> (JValue, bool) {
-        if let Some(func) = self.wrapped_value.function() {
-            return func.call(runtime, this, stack, argc);
-        }
-
-        if let Some(c) = self.wrapped_value.class() {
-            return c.call(runtime, JObject { inner: self }.into(), this, stack, argc);
-        }
-
-        return (JValue::Error(Error::CallOnNonFunction), true);
-    }
-
     pub(crate) fn to_mut(&self) -> &mut Self {
-        unsafe { (self as *const Self as *mut Self).as_mut().unwrap() }
+        unsafe { &mut *(self as *const Self as *mut Self) }
     }
 }
 
@@ -698,23 +734,27 @@ impl JObjectInner {
 pub enum JObjectValue {
     Empty,
     NewTarget,
-    Error(Error),
 
-    String(JString),
+    Module(ModuleId),
+
+    Error(Box<Error>),
+
+    String(JSString),
     Number(f64),
-    BigInt(i64),
+    BigInt(&'static JSBigInt),
     Boolean(bool),
     Symbol(JSymbol),
 
-    Array(Vec<(PropFlag, JValue)>),
+    Array(Arc<Vec<(PropFlag, JValue)>>),
     ArrayIterator(&'static JObject),
-    Function(JSFunctionInstance),
-    Generator(Generator),
-    Class(JSClassInstance),
+    Function(Arc<JSFunctionInstance>),
+    NativeFunction(Arc<RwLock<dyn Fn(JSContext, JValue, &[JValue]) -> Result<JValue, JValue>>>),
+    Generator(Box<JSGenerator>),
+    Class(Arc<JSClassInstance>),
 
-    Regex(Arc<RegExp>),
-    Promise(Promise),
-    Proxy(Proxy),
+    Regex(Box<RegExp>),
+    Promise(Box<Promise>),
+    Proxy(Box<Proxy>),
 
     Map(Box<HashMap<JValue, JValue>>),
     Set(Box<HashMap<JValue, ()>>),
@@ -725,7 +765,9 @@ pub enum JObjectValue {
     ArrayBuffer(Arc<Vec<u8>>),
     DataView(()),
 
-    TypedArray(TypedArray<()>),
+    TypedArray(Box<TypedArray<()>>),
+
+    CustomObject(Arc<dyn CustomObject>),
 }
 
 impl JObjectValue {
@@ -760,6 +802,13 @@ impl JObjectValue {
         }
     }
 
+    pub(crate) fn arc_array(&self) -> Option<&Arc<Vec<(PropFlag, JValue)>>> {
+        match self {
+            Self::Array(a) => Some(a),
+            _ => None,
+        }
+    }
+
     pub fn number(&self) -> Option<f64> {
         match self {
             Self::Number(f) => Some(*f),
@@ -767,14 +816,14 @@ impl JObjectValue {
         }
     }
 
-    pub fn string(&self) -> Option<&JString> {
+    pub fn string(&self) -> Option<&JSString> {
         match self {
             Self::String(s) => Some(s),
             _ => None,
         }
     }
 
-    pub fn function(&self) -> Option<&JSFunctionInstance> {
+    pub fn function(&self) -> Option<&Arc<JSFunctionInstance>> {
         match self {
             Self::Function(f) => Some(f),
             _ => None,
@@ -795,11 +844,46 @@ impl JObjectValue {
         }
     }
 
+    pub fn get_property(&mut self, key: u32) -> Option<JValue> {
+        match self {
+            Self::Array(a) => {
+                macro_rules! match_name {
+                    ($idx:tt) => {
+                        if key == NAMES[stringify!($idx)].0 {
+                            return a.get($idx).and_then(|v| Some(v.1));
+                        }
+                    };
+                }
+
+                match_name!(0);
+                match_name!(1);
+                match_name!(2);
+                match_name!(3);
+                match_name!(4);
+                match_name!(5);
+                match_name!(6);
+                match_name!(7);
+                match_name!(8);
+                match_name!(9);
+                match_name!(10);
+
+                let rt = Runtime::current();
+                let key = rt.get_field_name(key);
+
+                if let Ok(v) = fast_float::parse::<f64, _>(key) {
+                    return a.get(v as usize).and_then(|v| Some(v.1));
+                }
+            }
+            _ => {}
+        };
+        None
+    }
+
     #[inline]
     pub unsafe fn trace(&self) {
         match self {
             Self::Array(a) => {
-                for (_f, v) in a {
+                for (_f, v) in a.as_ref() {
                     v.trace();
                 }
             }
@@ -830,7 +914,7 @@ impl JObjectValue {
                 p.target.trace();
             }
             Self::Promise(p) => {
-                match p {
+                match p.as_ref() {
                     Promise::Fulfilled(f) => {
                         f.trace();
                     }
@@ -838,6 +922,7 @@ impl JObjectValue {
                         r.trace();
                     }
                     Promise::Pending { id: _ } => {}
+                    Promise::ForeverPending => {}
                 };
             }
             Self::Set(s) => {

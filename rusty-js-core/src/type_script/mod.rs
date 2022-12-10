@@ -1,17 +1,21 @@
 use std::collections::HashMap;
 
-mod object;
-mod interface;
 mod function;
+mod interface;
+mod object;
 use object::ObjectInfo;
 
 use interface::InterfaceInfo;
 
+use crate::{utils::string_interner::StringInterner, JSString};
+
+use self::{interface::TSInterface, object::TSObject};
+
 #[derive(Debug, Clone, PartialEq, PartialOrd, Hash)]
-pub struct TypeName{
-    name_space:u32,
-    priority:u32,
-    name:String
+pub struct TypeName {
+    name_space: u32,
+    priority: u32,
+    name: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -24,16 +28,16 @@ pub struct InterfaceId(u32);
 pub struct FunctionId(u32);
 
 pub struct TypeRegister {
-    pub names: string_interner::StringInterner,
+    pub names: StringInterner,
 
-    object_names:HashMap<TypeName, u32>,
-    objects:Vec<ObjectInfo>,
+    object_names: HashMap<TypeName, u32>,
+    objects: Vec<ObjectInfo>,
 
-    interface_names:HashMap<TypeName, u32>,
-    interfaces:Vec<InterfaceInfo>,
+    interface_names: HashMap<TypeName, u32>,
+    interfaces: Vec<InterfaceInfo>,
 
-    function_names:HashMap<TypeName, u32>,
-    functions:Vec<FunctionInfo>
+    function_names: HashMap<TypeName, u32>,
+    functions: Vec<FunctionInfo>,
 }
 
 pub struct FunctionInfo {
@@ -66,20 +70,31 @@ pub enum Type {
     },
     Any,
     Union(Box<Type>, Box<Type>),
-    Function{
-        optional:bool,
-        id:FunctionId,
+    Function {
+        optional: bool,
+        id: FunctionId,
     },
     Object {
         optional: bool,
         object: ObjectId,
     },
-    Array{
-        ty:Box<Type>,
-        optional:bool
+    Array {
+        ty: Box<Type>,
+        optional: bool,
     },
-    Interface{
-        interface:InterfaceId,
-        optional:bool,
-    }
+    Interface {
+        interface: InterfaceId,
+        optional: bool,
+    },
+}
+
+pub union TSValue {
+    object: TSObject,
+    interface: TSInterface,
+    string: JSString,
+    number: f64,
+    bigint: i64,
+    boolean: bool,
+
+    any: *const (Type, TSObject),
 }

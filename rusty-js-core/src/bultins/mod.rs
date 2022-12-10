@@ -1,24 +1,27 @@
+pub mod bigint;
 pub mod class;
 pub mod custom_object;
+pub mod flag;
 pub mod function;
+pub mod function_object;
 pub mod generator;
 pub mod object;
 pub mod object_builder;
 pub mod promise;
-pub mod prop;
 pub mod proxy;
 pub mod regex;
 pub mod strings;
 pub mod symbol;
 pub mod typed_array;
 
-mod module;
-
+pub use bigint::JSBigInt;
+pub use function::{JSContext, JSFunction, JSFunctionInstance};
 pub use object::JObject;
 
 use crate::Runtime;
 
 pub struct BuiltinPrototypes {
+    pub object: JObject,
     pub function: JObject,
     pub boolean: JObject,
     pub symbol: JObject,
@@ -30,6 +33,7 @@ pub struct BuiltinPrototypes {
     pub regex: JObject,
     pub array: JObject,
     pub typed_array: JObject,
+    pub promise: JObject,
     pub map: JObject,
     pub set: JObject,
     pub weakmap: JObject,
@@ -46,6 +50,7 @@ impl BuiltinPrototypes {
             #[allow(invalid_value)]
             let o = std::mem::MaybeUninit::uninit().assume_init();
             Self {
+                object: o,
                 function: o,
                 boolean: o,
                 symbol: o,
@@ -57,6 +62,7 @@ impl BuiltinPrototypes {
                 regex: o,
                 array: o,
                 typed_array: o,
+                promise: o,
                 map: o,
                 set: o,
                 weakmap: o,
@@ -71,25 +77,27 @@ impl BuiltinPrototypes {
 
     pub fn init(&mut self, rt: &mut Runtime) {
         *self = Self {
-            function: rt.allocate_obj().into(),
-            boolean: rt.allocate_obj().into(),
-            symbol: rt.allocate_obj().into(),
-            error: rt.allocate_obj().into(),
-            number: rt.allocate_obj().into(),
-            bigint: rt.allocate_obj().into(),
-            date: rt.allocate_obj().into(),
-            string: rt.allocate_obj().into(),
-            regex: rt.allocate_obj().into(),
-            array: rt.allocate_obj().into(),
-            typed_array: rt.allocate_obj().into(),
-            map: rt.allocate_obj().into(),
-            set: rt.allocate_obj().into(),
-            weakmap: rt.allocate_obj().into(),
-            weakset: rt.allocate_obj().into(),
-            array_buffer: rt.allocate_obj().into(),
-            data_view: rt.allocate_obj().into(),
-            weak_ref: rt.allocate_obj().into(),
-            finalization_registry: rt.allocate_obj().into(),
+            object: rt.allocate_obj().into(),
+            function: rt.create_object().into(),
+            boolean: rt.create_object().into(),
+            symbol: rt.create_object().into(),
+            error: rt.create_object().into(),
+            number: rt.create_object().into(),
+            bigint: rt.create_object().into(),
+            date: rt.create_object().into(),
+            string: rt.create_object().into(),
+            regex: rt.create_object().into(),
+            array: rt.create_object().into(),
+            typed_array: rt.create_object().into(),
+            promise: rt.create_object().into(),
+            map: rt.create_object().into(),
+            set: rt.create_object().into(),
+            weakmap: rt.create_object().into(),
+            weakset: rt.create_object().into(),
+            array_buffer: rt.create_object().into(),
+            data_view: rt.create_object().into(),
+            weak_ref: rt.create_object().into(),
+            finalization_registry: rt.create_object().into(),
         };
     }
 

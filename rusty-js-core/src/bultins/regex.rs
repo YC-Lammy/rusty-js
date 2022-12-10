@@ -63,6 +63,7 @@ impl std::ops::BitAnd for RegExpFlags {
     }
 }
 
+#[derive(Clone)]
 pub struct RegExp {
     pub flags: RegExpFlags,
     pub last_index: usize,

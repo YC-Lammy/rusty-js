@@ -6,4 +6,5 @@ pub enum Promise {
     Pending { id: AsyncId },
     Fulfilled(JValue),
     Rejected(JValue),
+    ForeverPending,
 }

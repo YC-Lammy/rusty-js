@@ -1,77 +1,114 @@
-use std::collections::HashMap;
+use std::{borrow::Cow, collections::HashMap};
 
 use lazy_static::__Deref;
-use string_interner::Symbol;
 
-lazy_static::lazy_static!{
-    pub static ref NAMES:HashMap<&'static str, u32> = Default::default();
+use crate::PropKey;
+
+use super::nohasher::NoHasherBuilder;
+
+lazy_static::lazy_static! {
+    pub static ref NAMES:HashMap<&'static str, PropKey> = Default::default();
+    pub static ref SYMBOLS:HashMap<&'static str, PropKey> = Default::default();
 }
 
-lazy_static::lazy_static!{
-    pub static ref INTERNER:string_interner::StringInterner = {
-        let mut s = string_interner::StringInterner::new();
+lazy_static::lazy_static! {
+    pub static ref INTERNER:StringInterner = {
+        let mut s = StringInterner::new();
         init_names(&mut s);
         s
     };
 }
 
-fn init_names(int:&mut string_interner::StringInterner){
-    let names = unsafe{(NAMES.deref() as *const _ as *mut HashMap<&'static str, u32>).as_mut().unwrap()};
-    register_name("Object", int, names);
-    register_name("__proto__", int, names);
-    register_name("constructor", int, names);
-    register_name("assign", int, names);
-    register_name("create", int, names);
-    register_name("defineProperty", int, names);
-    register_name("defineProperties", int, names);
-    register_name("entries", int, names);
-    register_name("freeze", int, names);
-    register_name("fromEntries", int, names);
-    register_name("getOwnPropertyDescriptor", int, names);
-    register_name("getOwnPropertyDescriptors", int, names);
-    register_name("getOwnPropertyNames", int, names);
-    register_name("getOwnPropertySymbols", int, names);
-    register_name("getPrototypeOf", int, names);
-    register_name("is", int, names);
-    register_name("isExtensible", int, names);
-    register_name("isFrozen", int, names);
-    register_name("isSealed", int, names);
-    register_name("keys", int, names);
-    register_name("preventExtensions", int, names);
-    register_name("seal", int, names);
-    register_name("setPrototypeOf", int, names);
-    register_name("values", int, names);
-    register_name("__definedGetter__", int, names);
-    register_name("__defineSetter__", int, names);
-    register_name("__lookupGetter__", int, names);
-    register_name("__lookupSetter__", int, names);
-    register_name("hasOwnProperty", int, names);
-    register_name("isPrototypeOf", int, names);
-    register_name("propertyIsEnumerable", int, names);
-    register_name("toLocaleString", int, names);
-    register_name("toString", int, names);
-    register_name("valueOf", int, names);
-
-    register_name("Number", int, names);
-    register_name("EPSILON", int, names);
-    register_name("MAX_SAFE_INTEGER", int, names);
-    register_name("MAX_VALUE", int, names);
-    register_name("MIN_SAFE_INTEGER", int, names);
-    register_name("MIN_VALUE", int, names);
-    register_name("NaN", int, names);
-    register_name("NEGATIVE_INFINITY", int, names);
-    register_name("POSITIVE_INFINITY", int, names);
-    register_name("isNaN", int, names);
-    register_name("isFinite", int, names);
-    register_name("isInteger", int, names);
-    register_name("isSafeInteger", int, names);
-    register_name("parseFloat", int, names);
-    register_name("parseInt", int, names);
-    register_name("toExponential", int, names);
-    register_name("toFixed", int, names);
-    register_name("toPrecision", int, names);
+#[derive(Default, Clone)]
+pub struct StringInterner {
+    // already hashed, use the nohasher
+    indexes: HashMap<u64, usize, NoHasherBuilder>,
+    strings: Vec<Cow<'static, str>>,
 }
 
-fn register_name(name:&'static str, int:&mut string_interner::StringInterner, names:&mut HashMap<&'static str, u32>){
-    names.insert(name, int.get_or_intern_static(name).to_usize() as u32);
+impl StringInterner {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn get_or_intern_static(&mut self, string: &'static str) -> usize {
+        let hash = fxhash::hash64(&string);
+
+        if let Some(v) = self.indexes.get(&hash) {
+            return *v;
+        }
+        let idx = self.strings.len();
+        self.strings.push(Cow::Borrowed(string));
+        self.indexes.insert(hash, idx);
+        return idx;
+    }
+
+    pub fn get_or_intern<S>(&mut self, string: S) -> usize
+    where
+        S: Into<String>,
+    {
+        let string = string.into();
+        let hash = fxhash::hash64(&string);
+
+        if let Some(i) = self.indexes.get(&hash) {
+            return *i;
+        }
+
+        let idx = self.strings.len();
+        self.strings.push(Cow::Owned(string));
+        self.indexes.insert(hash, idx);
+        return idx;
+    }
+
+    pub fn resolve(&self, idx: usize) -> Option<&str> {
+        self.strings.get(idx).and_then(|v| Some(v.as_ref()))
+    }
+
+    pub fn reserve(&mut self) -> usize {
+        let idx = self.strings.len();
+        self.strings.push(Cow::Borrowed(""));
+        idx
+    }
+}
+
+// static names known at compile time
+fn init_names(int: &mut StringInterner) {
+    let names = unsafe {
+        (NAMES.deref() as *const _ as *mut HashMap<&'static str, u32>)
+            .as_mut()
+            .unwrap()
+    };
+    let symbols = unsafe {
+        (SYMBOLS.deref() as *const _ as *mut HashMap<&'static str, u32>)
+            .as_mut()
+            .unwrap()
+    };
+
+    symbols.insert("asyncIterator", int.reserve() as u32);
+    symbols.insert("hasInstance", int.reserve() as u32);
+    symbols.insert("isConcatSpreadable", int.reserve() as u32);
+    symbols.insert("iterator", int.reserve() as u32);
+    symbols.insert("match", int.reserve() as u32);
+    symbols.insert("matchAll", int.reserve() as u32);
+    symbols.insert("replace", int.reserve() as u32);
+    symbols.insert("search", int.reserve() as u32);
+    symbols.insert("split", int.reserve() as u32);
+    symbols.insert("species", int.reserve() as u32);
+    symbols.insert("toPrimitive", int.reserve() as u32);
+    symbols.insert("toStringTag", int.reserve() as u32);
+    symbols.insert("unscopables", int.reserve() as u32);
+
+    let name = include_str!("names.txt");
+
+    for name in name.lines() {
+        register_name(name, int, names);
+    }
+}
+
+fn register_name(
+    name: &'static str,
+    int: &mut StringInterner,
+    names: &mut HashMap<&'static str, u32>,
+) {
+    names.insert(name, int.get_or_intern_static(name) as u32);
 }

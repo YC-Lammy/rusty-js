@@ -1,22 +1,40 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use crate::{error::Error, types::JValue, utils::nohasher, JObject, Runtime};
-
-use super::{
-    function::{JSFunction, JSFunctionInstance},
-    object::JObjectValue,
-    prop::PropFlag,
+use crate::{
+    error::Error,
+    operations,
+    types::JValue,
+    utils::{nohasher, string_interner::NAMES},
+    JObject, JSContext, PropKey, Runtime,
 };
 
-#[derive(Clone)]
+use super::{
+    flag::PropFlag,
+    function::{CaptureStack, JSFunction, JSFunctionInstance},
+    object::JObjectValue,
+};
+
 pub struct JSClassInstance {
     pub(crate) class: Arc<JSClass>,
     pub(crate) super_: Option<JObject>,
-    pub(crate) constructor_instance: Option<JSFunctionInstance>,
+    pub(crate) constructor_instance: Option<Arc<JSFunctionInstance>>,
+}
+
+impl Clone for JSClassInstance {
+    fn clone(&self) -> Self {
+        Self {
+            class: self.class.clone(),
+            super_: self.super_.clone(),
+            constructor_instance: self.constructor_instance.clone(),
+        }
+    }
 }
 
 impl JSClassInstance {
+    pub fn set_super(&self, super_: JObject) {
+        unsafe { (&mut *(self as *const Self as *mut Self)).super_ = Some(super_) };
+    }
     pub fn call(
         &self,
         runtime: &Runtime,
@@ -27,24 +45,33 @@ impl JSClassInstance {
     ) -> (JValue, bool) {
         // new: this must be an object
         if !this.is_object() {
-            return (JValue::Error(Error::ClassCannotBeInvokedWithoutNew), true);
-        }
-        // this must be a new target
-        if !unsafe { this.value.object.is_new_target() } {
-            return (JValue::Error(Error::ClassCannotBeInvokedWithoutNew), true);
+            return (JValue::from(Error::ClassCannotBeInvokedWithoutNew), true);
         }
 
-        let re = constructor.get_property_str("prototype");
+        let this = this.as_object().unwrap();
+        // this must be a new target
+        if !unsafe { operations::new_target(runtime).is_object() } {
+            return (JValue::from(Error::ClassCannotBeInvokedWithoutNew), true);
+        }
+
+        let re = constructor.get_property("prototype", JSContext { stack, runtime });
         if re.is_err() {
             return (re.err().unwrap(), true);
         }
 
         let proto = re.unwrap();
 
-        this.set_property_str("__proto__", proto).unwrap();
+        this.set_property(
+            "__proto__",
+            proto,
+            JSContext {
+                stack: stack,
+                runtime: runtime,
+            },
+        );
 
         if let Some(v) = &self.constructor_instance {
-            let (v, err) = v.call(runtime, this, stack, argc);
+            let (v, err) = v.clone().call(runtime, this.into(), stack, argc);
             if err {
                 return (v, true);
             }
@@ -53,19 +80,19 @@ impl JSClassInstance {
                 return (v, false);
             }
 
-            return (this, false);
+            return (this.into(), false);
         } else {
             // no constructor provided
             // call on super()
             if let Some(s) = &self.super_ {
-                let (v, err) = s.call(runtime, this, stack, argc as u32);
+                let (v, err) = s.call(runtime, this.into(), stack, argc);
 
                 if err {
                     return (v, err);
                 }
             }
 
-            return (this, false);
+            return (this.into(), false);
         }
     }
 }
@@ -101,15 +128,17 @@ impl JSClass {
     }
 
     pub fn to_mut(&self) -> &mut Self {
-        unsafe { (self as *const Self as *mut Self).as_mut().unwrap() }
+        unsafe { &mut *(self as *const Self as *mut Self) }
     }
 
     pub fn create_instance_with_capture(
         self: Arc<Self>,
-        capture_stack: *mut JValue,
+        capture_stack: CaptureStack,
     ) -> JSClassInstance {
         let c = if let Some(v) = &self.constructor {
-            Some(v.clone().create_instance_with_capture(None, capture_stack))
+            Some(Arc::new(
+                v.clone().create_instance_with_capture(None, capture_stack),
+            ))
         } else {
             None
         };
@@ -123,7 +152,7 @@ impl JSClass {
 
     pub fn create_instance(self: Arc<Self>) -> JSClassInstance {
         let c = if let Some(v) = &self.constructor {
-            Some(v.clone().create_instance(None))
+            Some(Arc::new(v.clone().create_instance(None)))
         } else {
             None
         };
@@ -135,25 +164,29 @@ impl JSClass {
         }
     }
 
-    pub fn create_object_with_capture(self: Arc<Self>, capture_stack: *mut JValue) -> JObject {
-        let inst = self.clone().create_instance_with_capture(capture_stack);
-        let mut obj = JObject::new();
-        obj.inner.to_mut().wrapped_value = JObjectValue::Class(inst);
+    pub fn ect_with_capture(self: Arc<Self>, capture_stack: CaptureStack) -> JObject {
+        let inst = self
+            .clone()
+            .create_instance_with_capture(capture_stack.clone());
+        let obj = JObject::new();
+        obj.inner.to_mut().wrapped_value = JObjectValue::Class(Arc::new(inst));
 
-        let mut prototype = JObject::new();
+        let prototype = JObject::new();
 
         for key in &self.props {
-            prototype.insert_property_static(
-                *key,
+            prototype.insert_property(
+                PropKey(*key),
                 JValue::UNDEFINED,
                 PropFlag::CONFIGURABLE | PropFlag::WRITABLE,
             );
         }
 
         for (k, f) in &self.methods {
-            let f = f.clone().create_instance_with_capture(None, capture_stack);
-            prototype.insert_property_static(
-                *k,
+            let f = f
+                .clone()
+                .create_instance_with_capture(None, capture_stack.clone());
+            prototype.insert_property(
+                PropKey(*k),
                 JObject::with_function(f).into(),
                 PropFlag::CONFIGURABLE | PropFlag::WRITABLE,
             );
@@ -161,19 +194,23 @@ impl JSClass {
 
         for (key, (getter, setter)) in &self.get_setters {
             if let Some(g) = getter {
-                let f = g.clone().create_instance_with_capture(None, capture_stack);
-                prototype.bind_getter(*key, JObject::with_function(f));
+                let f = g
+                    .clone()
+                    .create_instance_with_capture(None, capture_stack.clone());
+                prototype.bind_getter(PropKey(*key), JObject::with_function(f));
             }
 
             if let Some(s) = setter {
-                let f = s.clone().create_instance_with_capture(None, capture_stack);
-                prototype.bind_setter(*key, JObject::with_function(f));
+                let f = s
+                    .clone()
+                    .create_instance_with_capture(None, capture_stack.clone());
+                prototype.bind_setter(PropKey(*key), JObject::with_function(f));
             }
         }
 
         for key in &self.static_props {
-            obj.insert_property_static(
-                *key,
+            obj.insert_property(
+                PropKey(*key),
                 JValue::UNDEFINED,
                 PropFlag::CONFIGURABLE | PropFlag::WRITABLE,
             );
@@ -181,53 +218,63 @@ impl JSClass {
 
         for (key, (getter, setter)) in &self.static_get_setters {
             if let Some(g) = getter {
-                let f = g.clone().create_instance_with_capture(None, capture_stack);
-                obj.bind_getter(*key, JObject::with_function(f));
+                let f = g
+                    .clone()
+                    .create_instance_with_capture(None, capture_stack.clone());
+                obj.bind_getter(PropKey(*key), JObject::with_function(f));
             }
 
             if let Some(s) = setter {
-                let f = s.clone().create_instance_with_capture(None, capture_stack);
-                obj.bind_setter(*key, JObject::with_function(f));
+                let f = s
+                    .clone()
+                    .create_instance_with_capture(None, capture_stack.clone());
+                obj.bind_setter(PropKey(*key), JObject::with_function(f));
             }
         }
 
         for (k, f) in &self.static_methods {
-            let f = f.clone().create_instance_with_capture(None, capture_stack);
-            obj.insert_property_static(
-                *k,
+            let f = f
+                .clone()
+                .create_instance_with_capture(None, capture_stack.clone());
+            obj.insert_property(
+                PropKey(*k),
                 JObject::with_function(f).into(),
                 PropFlag::CONFIGURABLE | PropFlag::WRITABLE,
             );
         }
 
-        obj.insert_property("prototype", prototype.into(), PropFlag::NONE);
+        obj.insert_property(NAMES["prototype"], prototype.into(), PropFlag::NONE);
         obj.insert_property(
-            "name",
-            JValue::String(self.name.as_str().into()),
+            NAMES["name"],
+            JValue::create_string(self.name.as_str().into()),
             PropFlag::CONFIGURABLE,
         );
 
         let len = if self.constructor.is_none() {
             0
         } else {
-            self.constructor.as_ref().unwrap().args_len()
+            self.constructor.as_ref().unwrap().args_len
         };
 
-        obj.insert_property("length", JValue::Number(len as f64), PropFlag::CONFIGURABLE);
+        obj.insert_property(
+            NAMES["length"],
+            JValue::create_number(len as f64),
+            PropFlag::CONFIGURABLE,
+        );
 
         return obj;
     }
 
-    pub fn create_object_without_capture(self: Arc<Self>) -> JObject {
+    pub fn ect_without_capture(self: Arc<Self>) -> JObject {
         let inst = self.clone().create_instance();
-        let mut obj = JObject::new();
-        obj.inner.to_mut().wrapped_value = JObjectValue::Class(inst);
+        let obj = JObject::new();
+        obj.inner.to_mut().wrapped_value = JObjectValue::Class(Arc::new(inst));
 
-        let mut prototype = JObject::new();
+        let prototype = JObject::new();
 
         for key in &self.props {
-            prototype.insert_property_static(
-                *key,
+            prototype.insert_property(
+                PropKey(*key),
                 JValue::UNDEFINED,
                 PropFlag::CONFIGURABLE | PropFlag::WRITABLE,
             );
@@ -235,8 +282,8 @@ impl JSClass {
 
         for (k, f) in &self.methods {
             let f = f.clone().create_instance(None);
-            prototype.insert_property_static(
-                *k,
+            prototype.insert_property(
+                PropKey(*k),
                 JObject::with_function(f).into(),
                 PropFlag::CONFIGURABLE | PropFlag::WRITABLE,
             );
@@ -245,18 +292,18 @@ impl JSClass {
         for (key, (getter, setter)) in &self.get_setters {
             if let Some(g) = getter {
                 let f = g.clone().create_instance(None);
-                prototype.bind_getter(*key, JObject::with_function(f));
+                prototype.bind_getter(PropKey(*key), JObject::with_function(f));
             }
 
             if let Some(s) = setter {
                 let f = s.clone().create_instance(None);
-                prototype.bind_setter(*key, JObject::with_function(f));
+                prototype.bind_setter(PropKey(*key), JObject::with_function(f));
             }
         }
 
         for key in &self.static_props {
-            obj.insert_property_static(
-                *key,
+            obj.insert_property(
+                PropKey(*key),
                 JValue::UNDEFINED,
                 PropFlag::CONFIGURABLE | PropFlag::WRITABLE,
             );
@@ -265,44 +312,48 @@ impl JSClass {
         for (key, (getter, setter)) in &self.static_get_setters {
             if let Some(g) = getter {
                 let f = g.clone().create_instance(None);
-                obj.bind_getter(*key, JObject::with_function(f));
+                obj.bind_getter(PropKey(*key), JObject::with_function(f));
             }
 
             if let Some(s) = setter {
                 let f = s.clone().create_instance(None);
-                obj.bind_setter(*key, JObject::with_function(f));
+                obj.bind_setter(PropKey(*key), JObject::with_function(f));
             }
         }
 
         for (k, f) in &self.static_methods {
             let f = f.clone().create_instance(None);
-            obj.insert_property_static(
-                *k,
+            obj.insert_property(
+                PropKey(*k),
                 JObject::with_function(f).into(),
                 PropFlag::CONFIGURABLE | PropFlag::WRITABLE,
             );
         }
 
         prototype.insert_property(
-            "constructor",
+            NAMES["constructor"],
             obj.into(),
             PropFlag::CONFIGURABLE | PropFlag::WRITABLE,
         );
 
-        obj.insert_property("prototype", prototype.into(), PropFlag::NONE);
+        obj.insert_property(NAMES["prototype"], prototype.into(), PropFlag::NONE);
         obj.insert_property(
-            "name",
-            JValue::String(self.name.as_str().into()),
+            NAMES["name"],
+            JValue::create_string(self.name.as_str().into()),
             PropFlag::CONFIGURABLE,
         );
 
         let len = if self.constructor.is_none() {
             0
         } else {
-            self.constructor.as_ref().unwrap().args_len()
+            self.constructor.as_ref().unwrap().args_len
         };
 
-        obj.insert_property("length", JValue::Number(len as f64), PropFlag::CONFIGURABLE);
+        obj.insert_property(
+            NAMES["length"],
+            JValue::create_number(len as f64),
+            PropFlag::CONFIGURABLE,
+        );
 
         return obj;
     }
