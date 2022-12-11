@@ -107,7 +107,7 @@ impl FunctionBuilderContext {
         self.inner = Arc::new(ctx);
     }
 
-    pub fn new_function(&mut self) {
+    pub fn new_function(&mut self, params:usize) {
         let ctx = FunctionBuilderContextInner {
             parent: Some(self.inner.clone()),
             variables: Default::default(),
@@ -116,7 +116,7 @@ impl FunctionBuilderContext {
             is_global_context: false,
             //is_top_level: true,
             is_try: false,
-            stack_offset: 0,
+            stack_offset: params as _,
             capture_offset: {
                 if self.inner.is_global_context {
                     Some(0)

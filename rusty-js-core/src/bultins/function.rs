@@ -294,7 +294,7 @@ impl JSFunction {
             rt.worker_task_sender.send(Box::new(move ||{
                 let ctx = unsafe { std::mem::transmute_copy(&&runtime.baseline_context) };
                 let module = unsafe { std::mem::transmute_copy(&&runtime.baseline_module) };
-                let engine = unsafe { std::mem::transmute_copy(&&runtime.baseline_engine) };
+                let engine = unsafe { std::mem::transmute_copy(&runtime.baseline_engine.as_ref().unwrap()) };
                 let mut codegen = baseline::llvm::CodeGen::new(
                     ctx,
                     module,

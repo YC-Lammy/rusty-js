@@ -10,9 +10,6 @@ pub fn prepare_inlining(
     let exit = Block(block_count);
 
     let mut codes = vec![
-        OpCode::PrepareInlinedCall {
-            stack_offset: base_stack_offset,
-        },
         OpCode::SetThis { value: this },
         OpCode::CreateBlock(exit),
     ];

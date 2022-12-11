@@ -1459,10 +1459,6 @@ impl<'a> Interpreter<'a> {
                 self.r[result] = JValue::create_object(obj);
             }
 
-            OpCode::PrepareInlinedCall { stack_offset } => {
-                todo!()
-            }
-
             OpCode::Call {
                 result,
                 this,
@@ -1491,6 +1487,7 @@ impl<'a> Interpreter<'a> {
                 result,
                 callee,
                 stack_offset,
+                args_len
             } => {
                 let stack = &mut self.stack[stack_offset as usize..];
 

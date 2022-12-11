@@ -72,8 +72,9 @@ impl FunctionBuilder {
         mut ctx: FunctionBuilderContext,
         is_async: bool,
         is_generator: bool,
+        params:usize,
     ) -> Self {
-        ctx.new_function();
+        ctx.new_function(params);
         return Self {
             ctx: ctx,
             is_async,
@@ -175,6 +176,7 @@ impl FunctionBuilder {
                         self.ctx.clone(),
                         f.function.is_async,
                         f.function.is_generator,
+                        f.function.params.len()
                     );
                     builder.build_function(&f.function)?;
                     let id = builder.finish()?;
@@ -744,6 +746,7 @@ impl FunctionBuilder {
                     self.ctx.clone(),
                     a.is_async,
                     a.is_generator,
+                    a.params.len()
                 );
 
                 let mut i = 0;
@@ -1664,6 +1667,7 @@ impl FunctionBuilder {
                     self.ctx.clone(),
                     f.function.is_async,
                     f.function.is_generator,
+                    f.function.params.len()
                 );
 
                 builder.build_function(&f.function)?;
@@ -1817,6 +1821,7 @@ impl FunctionBuilder {
                     result: self.r1,
                     callee,
                     stack_offset: self.ctx.current_stack_offset(),
+                    args_len: n.args.as_ref().map(|n|n.len() as u16).unwrap_or(0)
                 });
 
                 self.try_check_error(self.r1);
@@ -1839,6 +1844,7 @@ impl FunctionBuilder {
                                     self.ctx.clone(),
                                     false,
                                     false,
+                                    0
                                 );
 
                                 if let Some(v) = &g.body {
@@ -1885,8 +1891,9 @@ impl FunctionBuilder {
                                 let mut builder = FunctionBuilder::new_with_context(
                                     self.runtime.clone(),
                                     self.ctx.clone(),
-                                    false,
-                                    false,
+                                    m.function.is_async,
+                                    m.function.is_generator,
+                                    m.function.params.len()
                                 );
 
                                 builder.build_function(&m.function)?;
@@ -1916,6 +1923,7 @@ impl FunctionBuilder {
                                     self.ctx.clone(),
                                     false,
                                     false,
+                                    1
                                 );
 
                                 builder.translate_param_pat(&s.param, 0)?;
@@ -2577,6 +2585,7 @@ impl FunctionBuilder {
                         self.ctx.clone(),
                         false,
                         false,
+                        c.params.len()
                     );
 
                     if let Some(b) = &c.body {
@@ -2608,6 +2617,7 @@ impl FunctionBuilder {
                         self.ctx.clone(),
                         m.function.is_async,
                         m.function.is_generator,
+                        m.function.params.len()
                     );
                     builder.build_function(&m.function)?;
                     let func_id = builder.finish()?;
@@ -2643,6 +2653,7 @@ impl FunctionBuilder {
                         self.ctx.clone(),
                         m.function.is_async,
                         m.function.is_generator,
+                        m.function.params.len()
                     );
 
                     builder.build_function(&m.function)?;

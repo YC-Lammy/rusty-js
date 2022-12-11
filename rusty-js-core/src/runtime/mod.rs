@@ -202,7 +202,7 @@ pub struct Runtime {
 
     pub(crate) baseline_context: inkwell::context::Context,
     pub(crate) baseline_module: inkwell::module::Module<'static>,
-    pub(crate) baseline_engine: inkwell::execution_engine::ExecutionEngine<'static>,
+    pub(crate) baseline_engine: Option<inkwell::execution_engine::ExecutionEngine<'static>>,
 }
 
 unsafe impl Sync for Runtime {}
@@ -309,23 +309,22 @@ impl Runtime {
         // allocate builtin prototypes
         runtime.to_mut().prototypes.init(runtime.to_mut());
 
-        let rt = Arc::into_raw(runtime.clone());
-        unsafe{Arc::decrement_strong_count(rt)};
-        let rt = rt as usize;
+        let weak_rt = Arc::downgrade(&runtime);
 
         for _ in 0..NUM_WORKER_THREAD {
             let recv = worker_recv.clone();
 
+            let weak_rt = weak_rt.clone();
+
             std::thread::spawn(move || loop {
-
-                unsafe{
-                    Arc::increment_strong_count(rt as *const Runtime);
-                };
-
-                let rt = unsafe{Arc::from_raw(rt as *const Runtime)};
 
                 match recv.recv() {
                     Ok(task) => {
+                    
+                        let rt = match weak_rt.upgrade(){
+                            Some(rt) => rt,
+                            None => return
+                        };
 
                         rt.attach();
                         (task)();
@@ -489,7 +488,7 @@ impl Runtime {
         self: Arc<Self>,
         module: swc_ecmascript::ast::Module,
     ) -> Result<JValue, crate::error::Error> {
-        let mut builder = crate::bytecodes::bytecode_builder::FunctionBuilder::new_with_context(self.clone(), self.function_builder_context.clone(), false, false);
+        let mut builder = crate::bytecodes::bytecode_builder::FunctionBuilder::new_with_context(self.clone(), self.function_builder_context.clone(), false, false, 0);
 
         for i in module.body {
             match i {
@@ -1596,6 +1595,8 @@ impl Runtime {
 
 impl Drop for Runtime{
     fn drop(&mut self) {
-        println!("runtime dropped")
+        //println!("runtime dropped")
+        // the egine segfaults when drop, more debugging is needed
+        unsafe{(&mut self.baseline_engine as *mut Option<_>).write(None)};
     }
 }

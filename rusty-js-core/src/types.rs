@@ -39,6 +39,12 @@ impl JSType {
     }
 }
 
+impl std::fmt::Display for JSType{
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
 impl std::ops::BitOr for JSType{
     type Output = Self;
     fn bitor(self, rhs: Self) -> Self::Output {

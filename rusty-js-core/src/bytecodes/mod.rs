@@ -366,11 +366,6 @@ pub enum OpCode {
         start: u32,
     },
 
-    /// prepare for an inlined call
-    PrepareInlinedCall {
-        stack_offset: u16,
-    },
-
     /// call a function using the stack + offset.
     ///
     /// arguments are already on the stack
@@ -392,6 +387,7 @@ pub enum OpCode {
         #[r]
         callee: Register,
         stack_offset: u16,
+        args_len: u16,
     },
     /// get the metadata new.target
     NewTarget {

@@ -14,6 +14,18 @@ use crate::{operations, JSContext, PropKey};
 use super::Registers;
 use super::Res;
 
+type F = Box<
+    dyn Fn(
+        &mut ClousureState,
+        JSContext,
+        &mut Registers,
+        &mut JValue,
+        &[JValue],
+        &mut [JValue],
+        &mut usize,
+    ) -> Result<Res, JValue>,
+    >;
+
 struct ClousureState<'a> {
     runtime: &'a Runtime,
     op_stack: *mut JValue,
@@ -2154,9 +2166,6 @@ impl Clousure {
                     Ok(Res::Ok)
                 },
             ),
-            OpCode::PrepareInlinedCall { stack_offset } => {
-                todo!()
-            }
             OpCode::Call {
                 result,
                 this: this_reg,
@@ -2198,6 +2207,7 @@ impl Clousure {
                 result,
                 callee,
                 stack_offset,
+                args_len
             } => Box::new(
                 move |state: &mut ClousureState,
                       ctx: JSContext,
