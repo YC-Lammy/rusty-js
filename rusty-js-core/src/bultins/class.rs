@@ -164,7 +164,7 @@ impl JSClass {
         }
     }
 
-    pub fn ect_with_capture(self: Arc<Self>, capture_stack: CaptureStack) -> JObject {
+    pub fn create_with_capture(self: Arc<Self>, capture_stack: CaptureStack) -> JObject {
         let inst = self
             .clone()
             .create_instance_with_capture(capture_stack.clone());
@@ -265,7 +265,7 @@ impl JSClass {
         return obj;
     }
 
-    pub fn ect_without_capture(self: Arc<Self>) -> JObject {
+    pub fn create_without_capture(self: Arc<Self>) -> JObject {
         let inst = self.clone().create_instance();
         let obj = JObject::new();
         obj.inner.to_mut().wrapped_value = JObjectValue::Class(Arc::new(inst));

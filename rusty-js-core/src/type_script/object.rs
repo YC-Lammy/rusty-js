@@ -1,20 +1,30 @@
 use std::collections::HashMap;
 
+use std::sync::Arc;
+
 use super::InterfaceId;
-use super::ObjectId;
 use super::Type;
 use crate::runtime::GcFlag;
 
 pub struct ObjectInfo {
-    pub property_names: HashMap<String, usize>,
-    pub properties: Vec<Type>,
+    /// a sorted array
+    pub properties: Vec<(u32, Type)>,
 
     /// null or object, the prototype of this type
-    pub prototype: Option<*const ObjectInfo>,
-    pub impls: HashMap<InterfaceId, &'static [usize]>,
+    pub prototype: Option<Arc<ObjectInfo>>,
+
+    pub implements: Vec<InterfaceId>,
 
     /// to create this type, simply clone this object
     pub cached_object: Option<TSObject>,
+}
+
+impl PartialEq for ObjectInfo{
+    fn eq(&self, other: &Self) -> bool {
+        self.prototype == other.prototype &&
+        self.properties.as_slice() == other.properties.as_slice() &&
+        self.implements == other.implements
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -43,56 +53,28 @@ pub struct TSObjectFragment {
 }
 
 impl ObjectInfo {
-    /// total length including header and fragments
-    fn total_length(&self) -> u32 {
-        let mut p = std::mem::size_of::<TSObjectHeader>();
-        p += self.fragment_length();
-
-        let mut proto = self.prototype;
-        while let Some(o) = proto {
-            unsafe {
-                let o = o.as_ref().unwrap();
-                p += o.fragment_length();
-                proto = o.prototype;
+    pub fn property_offset(&self, property:u32) -> Option<usize>{
+        let mut i = 0;
+        for (p, _t) in &self.properties{
+            if *p == property{
+                return Some((i) as usize * 8)
             }
+            i += 1;
         }
-        return p as u32;
+        return None
     }
 
-    fn fragment_length(&self) -> usize {
+    pub fn fragment_length(&self) -> usize {
         (self.properties.len() * 8) + std::mem::size_of::<TSObjectFragment>()
     }
 
-    pub fn creat_object(&self) -> TSObject {
-        unsafe {
-            let total_len = self.total_length();
-
-            let b = Self::alloc_zero(total_len as usize) as *mut TSObjectHeader;
-            b.write(TSObjectHeader {
-                flag: GcFlag::Used,
-                total_length: total_len as u32,
-            });
-
-            let first_fragment = b.add(1) as *mut TSObjectFragment;
-            self.init_fragment(first_fragment);
-
-            return TSObject {
-                inner: first_fragment.as_ref().unwrap(),
-            };
+    pub fn total_length(&self) -> usize{
+        if let Some(p) = &self.prototype{
+            return self.fragment_length() + p.total_length()
+        } else{
+            return self.fragment_length()
         }
-    }
-
-    unsafe fn init_fragment(&self, fragment: *mut TSObjectFragment) {
-        fragment.write(TSObjectFragment {
-            offset: std::mem::size_of::<TSObjectHeader>() as u32,
-            length: self.properties.len() as u32 * 8,
-            ty: self as *const Self,
-            data: [0; 0],
-        });
-    }
-
-    fn alloc_zero(size: usize) -> *mut u8 {
-        todo!()
+        
     }
 }
 

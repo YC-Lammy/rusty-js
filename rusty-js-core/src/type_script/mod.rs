@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::sync::Arc;
 
 mod function;
 mod interface;
@@ -45,7 +46,7 @@ pub struct FunctionInfo {
     pub returns: Vec<Type>,
 }
 
-#[derive(Debug, Clone, PartialEq, PartialOrd)]
+#[derive(Clone, PartialEq)]
 #[repr(u8)]
 pub enum Type {
     Null,
@@ -68,6 +69,7 @@ pub enum Type {
     Boolean {
         optional: bool,
     },
+    ///equivelent to javascript value
     Any,
     Union(Box<Type>, Box<Type>),
     Function {
@@ -76,7 +78,7 @@ pub enum Type {
     },
     Object {
         optional: bool,
-        object: ObjectId,
+        object: Arc<ObjectInfo>,
     },
     Array {
         ty: Box<Type>,
@@ -86,15 +88,4 @@ pub enum Type {
         interface: InterfaceId,
         optional: bool,
     },
-}
-
-pub union TSValue {
-    object: TSObject,
-    interface: TSInterface,
-    string: JSString,
-    number: f64,
-    bigint: i64,
-    boolean: bool,
-
-    any: *const (Type, TSObject),
 }

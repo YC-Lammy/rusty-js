@@ -2928,9 +2928,9 @@ impl Clousure {
                     let class = state.runtime.get_class(class_id);
 
                     let obj = if state.is_global {
-                        class.ect_without_capture()
+                        class.create_without_capture()
                     } else {
-                        unsafe { class.ect_with_capture(state.cap.clone().unwrap()) }
+                        unsafe { class.create_with_capture(state.cap.clone().unwrap()) }
                     };
 
                     regs[result] = obj.into();

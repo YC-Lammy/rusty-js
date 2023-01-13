@@ -7,6 +7,7 @@ macro_rules! builtin {
         $obj.insert_property_builtin(NAMES[$name], $rt.create_native_function($f).into());
     };
 }
+
 pub(crate) fn creat_object(rt: &Runtime) -> JObject {
     let prototype = rt.prototypes.number;
 

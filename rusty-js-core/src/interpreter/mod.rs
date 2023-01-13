@@ -12,7 +12,7 @@ use crate::error::Error;
 use crate::runtime::Runtime;
 use crate::types::JValue;
 use crate::utils::iterator::JSIterator;
-use crate::utils::string_interner::NAMES;
+use crate::utils::string_interner::{NAMES, SYMBOLS};
 use crate::{operations, JSContext, Promise, PropKey, ToProperyKey};
 
 //use self::block_compiler::CompiledBlock;
@@ -1424,7 +1424,9 @@ impl<'a> Interpreter<'a> {
                 value,
                 stack_offset,
             } => {
-                self.stack[stack_offset as usize] = self.r[value];
+                let value = self.r[value];
+                value.get_method(SYMBOLS["iterator"], ctx)?;
+                self.stack[stack_offset as usize] = value;
             }
             OpCode::SpreadArg {
                 base_stack_offset,
@@ -1521,14 +1523,14 @@ impl<'a> Interpreter<'a> {
             OpCode::CreateBlock(_b) => {
                 //self.blocks.insert(b, None);
             }
-            OpCode::SwitchToBlock(b) => {
+            OpCode::SwitchToBlock(_b) => {
                 //self.insert_block(b, *index)
             }
-            OpCode::Jump { to, line } => {
+            OpCode::Jump { to:_, line } => {
                 *index = line as usize;
                 return Ok(Res::Ok);
             }
-            OpCode::JumpIfFalse { value, to, line } => {
+            OpCode::JumpIfFalse { value, to:_, line } => {
                 if !self.r[value].to_bool() {
                     *index = line as usize;
                     return Ok(Res::Ok);
@@ -1754,9 +1756,7 @@ impl<'a> Interpreter<'a> {
             } => {
                 let obj = self.r[obj];
                 if let Some(obj) = obj.as_object() {
-                    unsafe {
-                        obj.bind_getter(PropKey(field_id), self.r[getter].as_object().unwrap())
-                    }
+                    obj.bind_getter(PropKey(field_id), self.r[getter].as_object().unwrap())
                 }
             }
             OpCode::BindSetter {
@@ -1772,7 +1772,7 @@ impl<'a> Interpreter<'a> {
             OpCode::CloneObject { obj, result } => {
                 let obj = self.r[obj];
                 if let Some(obj) = obj.as_object() {
-                    self.r[result] = JValue::create_object(unsafe { obj.deep_clone() });
+                    self.r[result] = JValue::create_object(obj.deep_clone());
                 }
             }
             OpCode::ExtendObject { obj, from } => {
@@ -1856,9 +1856,9 @@ impl<'a> Interpreter<'a> {
                 let class = self.runtime.get_class(class_id);
 
                 let obj = if self.is_global {
-                    class.ect_without_capture()
+                    class.create_without_capture()
                 } else {
-                    unsafe { class.ect_with_capture(self.cap.clone().unwrap()) }
+                    class.create_with_capture(self.cap.clone().unwrap())
                 };
 
                 self.r[result] = obj.into();
