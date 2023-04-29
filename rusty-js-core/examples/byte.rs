@@ -1,5 +1,5 @@
 use rusty_js_core::runtime::{ClassID, ConstID, FuncID, RegexID, StringID, TemplateID};
-use rusty_js_core::types::JValue;
+use rusty_js_core::value::JValue;
 
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Hash)]
 pub struct Register(pub u8);

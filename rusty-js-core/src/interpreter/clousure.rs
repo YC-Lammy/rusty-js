@@ -1,15 +1,15 @@
 use likely_stable::likely;
 
-use crate::bultins::flag::PropFlag;
+use crate::bultins::object_property::PropFlag;
 use crate::bultins::function::CaptureStack;
 use crate::bultins::object::JObject;
 use crate::bytecodes::{Block, OpCode, Register};
 use crate::error::Error;
 use crate::runtime::Runtime;
-use crate::types::JValue;
+use crate::value::JValue;
 use crate::utils::iterator::JSIterator;
 use crate::utils::string_interner::NAMES;
-use crate::{operations, JSContext, PropKey};
+use crate::{operations, JSContext, PropKey, Promise};
 
 use super::Registers;
 use super::Res;
@@ -132,6 +132,122 @@ impl Clousure {
                 Ok(re) => match re {
                     Res::Ok => {}
                     Res::Return(r) => return Ok(r),
+                    _ => {}
+                },
+            }
+
+            i += 1;
+        }
+        Ok(JValue::UNDEFINED)
+    }
+
+    async fn run_async<'a>(
+        &mut self,
+        runtime: &Runtime,
+        stack: &mut [JValue],
+        op_stack: &mut [JValue],
+        capture_stack: Option<CaptureStack>,
+        capture_stack_data: Option<&mut [JValue]>,
+        mut this: JValue,
+        args: &[JValue],
+        mut yield_value: tokio::sync::mpsc::Receiver<JValue>,
+        mut yielder_sender: tokio::sync::mpsc::Sender<JValue>
+    ) -> Result<JValue, JValue>{
+        let mut i = 0;
+
+        let is_global = capture_stack_data.is_none();
+
+        let mut state = ClousureState {
+            runtime,
+            op_stack: op_stack.as_mut_ptr(),
+            accumulator: JValue::UNDEFINED,
+
+            arg_offset_counter: 0,
+            arg_len: 0,
+            cap: capture_stack,
+            capture_stack: capture_stack_data,
+            catch_block: Default::default(),
+            is_global: is_global,
+            iterators: Vec::new(),
+            temps: Default::default(),
+        };
+
+        let mut regs = Registers([JValue::UNDEFINED; 3]);
+        let ctx = JSContext {
+            stack: state.op_stack,
+            runtime: state.runtime,
+        };
+
+        loop {
+            if i == self.codes.len() {
+                break;
+            }
+            let code = unsafe{self.codes.get_unchecked_mut(i)};
+
+            //debug::debug!("run code {:#?}", code);
+
+            let re = (code)(&mut state, ctx, &mut regs, &mut this, args, stack, &mut i);
+
+            match re {
+                Err(e) => {
+                    if let Some((_catch_block, line)) = state.catch_block.pop() {
+                        regs[Register(0)] = e;
+
+                        i = line as usize;
+                    } else {
+                        return Err(e);
+                    }
+                }
+                Ok(re) => match re {
+                    Res::Ok => {}
+                    Res::Return(r) => return Ok(r),
+                    Res::Yield(v, r) => {
+                        yielder_sender.send(v).await;
+                        let v = yield_value.recv().await.unwrap_or(JValue::UNDEFINED);
+                        regs[r] = v;
+                    },
+                    Res::Await(v, r) => {
+                        if let Some(o) = v.as_object(){
+                            if let Some(p) = o.as_promise(){
+                                match p{
+                                    Promise::ForeverPending => {
+                                        return Err(Error::AwaitOnForeverPendingPromise.into());
+                                    },
+                                    Promise::Fulfilled(f) => {
+                                        regs[r] = *f;
+                                    },
+                                    Promise::Rejected(e) => {
+                                        if let Some((_catch_block, line)) = state.catch_block.pop() {
+                                            regs[Register(0)] = *e;
+                    
+                                            i = line as usize;
+                                        } else {
+                                            return Err(*e);
+                                        }
+                                    }
+                                    Promise::Pending { id } => {
+                                        let re = runtime.to_mut().get_future(*id).await;
+                                        match re{
+                                            Ok(v) => {
+                                                regs[r] = v
+                                            }
+                                            Err(e) => {
+                                                if let Some((_catch_block, line)) = state.catch_block.pop() {
+                                                    regs[Register(0)] = e;
+                            
+                                                    i = line as usize;
+                                                } else {
+                                                    return Err(e);
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        } else{
+                            regs[r] = v;
+                        }
+                    }
                     _ => {}
                 },
             }

@@ -8,8 +8,8 @@ use super::function_builder_context::{DeclareKind, FunctionBuilderContext};
 use crate::bultins::function::JSFunction;
 use crate::error::Error;
 use crate::runtime::{FuncID, Runtime};
-use crate::types::JValue;
-use crate::{bultins, bytecodes::*};
+use crate::value::JValue;
+use crate::{bultins, bytecodes::*, operations};
 
 const SUPER_CONSTRUCTOR_VAR_NAME: &'static str = "SUPER CONSTRUCTOR";
 
@@ -1051,13 +1051,210 @@ impl FunctionBuilder {
                     return Ok(self.r1);
                 }
 
-                let lhs = self.translate_expr(&b.left)?;
-
                 // both are literals, use a constant value
                 if b.left.is_lit() && b.right.is_lit() {
-                    todo!()
+                    let left = b.left.as_lit().unwrap();
+                    let right = b.right.as_lit().unwrap();
+
+                    // convert lit to a JSValue
+                    let to_value = |lit: &Lit| -> Result<JValue, Error>{
+                        let v = match lit{
+                            Lit::BigInt(b) => {
+                                JValue::create_bigint(b.value.to_i128().expect("bigint larger then i128 is not supported"))
+                            },
+                            Lit::Bool(b) => {
+                                if b.value{
+                                    JValue::TRUE
+                                } else{
+                                    JValue::FALSE
+                                }
+                            },
+                            Lit::Null(_) => {
+                                JValue::NULL
+                            },
+                            Lit::Num(n) => {
+                                JValue::create_number(n.value)
+                            },
+                            Lit::Regex(r) => {
+                                let re = self.runtime.to_mut().register_regex(&r.exp, &r.flags);
+                                let id = match re{
+                                    Ok(r) => r,
+                                    Err(e) => {
+                                        return Err(Error::SyntaxError(e))
+                                    }
+                                };
+                                JValue::create_object(unsafe{self.runtime.get_regex_object(id)})
+                            },
+                            Lit::Str(s) => {
+                                JValue::create_string(self.runtime.allocate_string(&s.value))
+                            },
+                            Lit::JSXText(_) => {
+                                todo!("JSXTest not supported")
+                            }
+                        };
+                        Ok(v)
+                    };
+
+                    // convert lit to value
+                    let left = to_value(left)?;
+                    let right = to_value(right)?;
+
+                    // create a context for conversion
+                    let ctx = crate::JSContext { stack: self.runtime.to_mut().stack.as_mut_ptr(), runtime: &self.runtime };
+                    
+                    // perform the binary operation on the values
+                    let value = match b.op{
+                        BinaryOp::Add => {
+                            left.add(right, ctx)
+                        },
+                        BinaryOp::BitAnd => {
+                            left.bitand(right, ctx)
+                        },
+                        BinaryOp::BitOr => {
+                            left.bitor(right, ctx)
+                        },
+                        BinaryOp::BitXor => {
+                            left.bitxor(right, ctx)
+                        },
+                        BinaryOp::Div => {
+                            left.div(right, ctx)
+                        },
+                        BinaryOp::EqEq => {
+                            left.eqeq(right, ctx).map(|t|t.into())
+                        },
+                        BinaryOp::EqEqEq => {
+                            Ok(left.eqeqeq(right).into())
+                        },
+                        BinaryOp::Exp => {
+                            left.exp(right, ctx)
+                        },
+                        BinaryOp::Gt => {
+                            let mut re= Default::default();
+                            operations::gt(left, right, ctx.stack, ctx.runtime, &mut re);
+                            re.into()
+                        },
+                        BinaryOp::GtEq => {
+                            let mut re= Default::default();
+                            operations::gteq(left, right, ctx.stack, ctx.runtime, &mut re);
+                            re.into()
+                        },
+                        BinaryOp::In => {
+                            // this may happen only if the right hand side is a regex
+                            return Err(Error::TypeError(format!(
+                                "Cannot use 'in' operator to search for '{}' in {}",
+                                left.to_string(),
+                                right.to_string()
+                            ))
+                            .into());
+                        },
+                        BinaryOp::InstanceOf => {
+                            left.instance_of(right, ctx)
+                        },
+                        BinaryOp::LShift => {
+                            left.lshift(right, ctx)
+                        },
+                        BinaryOp::LogicalAnd => {
+                            Ok((left.to_bool() && right.to_bool()).into())
+                        },
+                        BinaryOp::LogicalOr => {
+                            if left.to_bool(){
+                                Ok(left)
+                            } else{
+                                Ok(right)
+                            }
+                        },
+                        BinaryOp::Lt => {
+                            let mut re= Default::default();
+                            operations::lt(left, right, ctx.stack, ctx.runtime, &mut re);
+                            re.into()
+                        },
+                        BinaryOp::LtEq => {
+                            let mut re= Default::default();
+                            operations::lteq(left, right, ctx.stack, ctx.runtime, &mut re);
+                            re.into()
+                        },
+                        BinaryOp::Mod => {
+                            left.rem(right, ctx)
+                        },
+                        BinaryOp::Mul => {
+                            left.mul(right, ctx)
+                        },
+                        BinaryOp::NotEq => {
+                            left.eqeq(right, ctx).map(|t|(!t).into())
+                        },
+                        BinaryOp::NotEqEq => {
+                            Ok((!left.eqeqeq(right)).into())
+                        },
+                        BinaryOp::NullishCoalescing => {
+                            if left.is_null() || left.is_undefined(){
+                                Ok(right)
+                            } else{
+                                Ok(left)
+                            }
+                        },
+                        BinaryOp::RShift => {
+                            left.rshift(right, ctx)
+                        },
+                        BinaryOp::Sub => {
+                            left.sub(right, ctx)
+                        },
+                        BinaryOp::ZeroFillRShift => {
+                            left.unsigned_rshift(right, ctx)
+                        }
+                    };
+
+                    // check if any error occours, most likely mixing bigint with number.
+                    let value = match value{
+                        Ok(v) => v,
+                        Err(e) => {
+                            return Err(Error::Value(e))
+                        }
+                    };
+
+                    // translate result into a load op
+                    if value.is_bigint(){
+                        let id = self.runtime.to_mut().unamed_constant(value);
+                        self.bytecode.push(OpCode::LoadStaticBigInt { result: self.r1, id: id });
+
+                    } else if value.is_false(){
+                        self.bytecode.push(OpCode::LoadFalse { result: self.r1 });
+                    } else if value.is_true(){
+                        self.bytecode.push(OpCode::LoadTrue { result: self.r1 });
+                    } else if value.is_int() {
+                        let v = value.as_int_unchecked() as f32;
+                        if v as i32 == value.as_int_unchecked(){
+                            self.bytecode.push(OpCode::LoadStaticFloat32 { result: self.r1, value: v })
+                        } else{
+                            let id = self.runtime.to_mut().unamed_constant(JValue::create_number(value.as_int_unchecked() as f64));
+                            self.bytecode.push(OpCode::LoadStaticFloat { result: self.r1, id: id })
+                        };
+                    } else if value.is_null() {
+                        self.bytecode.push(OpCode::LoadNull { result: self.r1 });
+                    } else if value.is_number() {
+
+                        let v = value.as_number_uncheck();
+                        if v as f32 as f64 == v{
+                            self.bytecode.push(OpCode::LoadStaticFloat32 { result: self.r1, value: v as f32 });
+                        } else{
+                            let id = self.runtime.to_mut().unamed_constant(value);
+                            self.bytecode.push(OpCode::LoadStaticFloat { result: self.r1, id: id })
+                        }
+                        
+                    } else if value.is_string(){
+                        let id = self.runtime.to_mut().register_string(&value.to_string());
+                        self.bytecode.push(OpCode::LoadStaticString { result: self.r1, id: id });
+
+
+                    } else{
+                        // not a possible output
+                        unreachable!()
+                    }
+
+                    return Ok(self.r1)
+
                 } else if let Some(lit) = b.right.as_lit() {
-                    // the left hand side is a literal, use immediate ops
+                    // the right hand side is a literal, use immediate ops
+                    let lhs = self.translate_expr(&b.left)?;
 
                     match lit {
                         Lit::BigInt(big) => {
@@ -1219,7 +1416,9 @@ impl FunctionBuilder {
                                     }
                                 };
                                 return Ok(self.r1);
+
                             } else if (n.value as f32) as f64 == n.value {
+                                // the value can be contained in an f32, use imm operation
                                 let v = n.value as f32;
 
                                 match b.op {
@@ -1391,29 +1590,38 @@ impl FunctionBuilder {
                                 }
 
                                 return Ok(self.r1);
+                            },
+                            _ => {
+                                // not return and continue to the slow path
                             }
-                            _ => {}
                         },
-                        Lit::Bool(bo) => match b.op {
-                            BinaryOp::LogicalAnd => {
-                                if !bo.value {
-                                    self.bytecode.push(OpCode::LoadFalse { result: self.r1 });
-                                    return Ok(self.r1);
-                                } else {
-                                    self.bytecode.push(OpCode::AndImm {
-                                        result: self.r1,
-                                        left: lhs,
-                                        right: true,
-                                    });
-                                    return Ok(self.r1);
+                        Lit::Bool(bo) => {
+                            match b.op {
+                                BinaryOp::LogicalAnd => {
+                                    if !bo.value {
+                                        self.bytecode.push(OpCode::LoadFalse { result: self.r1 });
+                                        return Ok(self.r1);
+                                    } else {
+                                        self.bytecode.push(OpCode::AndImm {
+                                            result: self.r1,
+                                            left: lhs,
+                                            right: true,
+                                        });
+                                        return Ok(self.r1);
+                                    }
+                                },
+                                _ => {
+                                    // not return and continue to the slow path
                                 }
                             }
-                            _ => {}
                         },
-                        _ => {}
+                        _ => {
+                            // not return and continue to the slow path
+                        }
                     }
                 };
                 // slow path
+                let lhs = self.translate_expr(&b.left)?;
 
                 let mut store_temp = true;
 
@@ -1648,12 +1856,15 @@ impl FunctionBuilder {
                     to: self.r3,
                 });
 
+                // read the cons value
                 self.bytecode.push(OpCode::ReadTemp { value: self.r2 });
                 self.bytecode.push(OpCode::ReleaseTemp);
 
+                // read the test value
                 self.bytecode.push(OpCode::ReadTemp { value: self.r1 });
                 self.bytecode.push(OpCode::ReleaseTemp);
 
+                // perform the selection
                 self.bytecode.push(OpCode::CondSelect {
                     t: self.r1,
                     a: self.r2,
@@ -1662,6 +1873,7 @@ impl FunctionBuilder {
                 });
             }
             Expr::Fn(f) => {
+                // cretae a function builder
                 let mut builder = FunctionBuilder::new_with_context(
                     self.runtime.clone(),
                     self.ctx.clone(),
@@ -1670,12 +1882,16 @@ impl FunctionBuilder {
                     f.function.params.len()
                 );
 
+                // build the function
                 builder.build_function(&f.function)?;
 
+                // close the function and retreive its id
                 let id = builder.finish()?;
 
+                // push any operation needed from the context
                 self.bytecode.extend(self.ctx.need_done());
 
+                // create the function
                 self.bytecode.push(OpCode::CreateFunction {
                     result: self.r1,
                     id,
@@ -1683,6 +1899,7 @@ impl FunctionBuilder {
             }
 
             Expr::Ident(i) => {
+                // get the variable from the context
                 self.bytecode.push(self.ctx.get(&i.to_id(), self.r1));
             }
 
@@ -1693,12 +1910,14 @@ impl FunctionBuilder {
             }
             Expr::Lit(l) => match l {
                 Lit::BigInt(b) => {
+                    // use 32bit when possible
                     if b.value.bits() <= 32 {
                         self.bytecode.push(OpCode::LoadStaticBigInt32 {
                             result: self.r1,
                             value: b.value.to_i32().unwrap(),
                         });
                     } else {
+                        // register it to the runtime
                         let id = self.runtime.to_mut().unamed_constant(JValue::create_bigint(
                             b.value
                                 .to_i128()
@@ -1709,7 +1928,7 @@ impl FunctionBuilder {
                             id,
                         });
                     }
-                }
+                },
                 Lit::Bool(b) => {
                     if b.value {
                         self.bytecode.push(OpCode::LoadTrue { result: self.r1 });
@@ -1724,7 +1943,15 @@ impl FunctionBuilder {
                     self.bytecode.push(OpCode::LoadNull { result: self.r1 });
                 }
                 Lit::Num(n) => {
-                    if n.value > f32::MAX as f64 {
+                    // check if number can be contained in f32
+                    if n.value as f32 as f64 == n.value {
+                        self.bytecode.push(OpCode::LoadStaticFloat32 {
+                            result: self.r1,
+                            value: n.value as f32,
+                        });
+                        
+                    } else {
+                        // register number to the runtime
                         let id = self
                             .runtime
                             .to_mut()
@@ -1734,16 +1961,13 @@ impl FunctionBuilder {
                             result: self.r1,
                             id,
                         });
-                    } else {
-                        self.bytecode.push(OpCode::LoadStaticFloat32 {
-                            result: self.r1,
-                            value: n.value as f32,
-                        });
                     }
-                }
+                },
                 Lit::Regex(r) => {
+                    // create the regex
                     let re = self.runtime.to_mut().register_regex(&r.exp, &r.flags);
 
+                    // return an error if compiling regex failed
                     let id = match re {
                         Ok(v) => v,
                         Err(e) => return Err(Error::SyntaxError(e)),
@@ -1754,7 +1978,10 @@ impl FunctionBuilder {
                     });
                 }
                 Lit::Str(s) => {
+                    // register the string
                     let id = self.runtime.to_mut().register_string(&s.value);
+
+                    // create the string
                     self.bytecode.push(OpCode::LoadStaticString {
                         result: self.r1,
                         id: id,
@@ -1762,20 +1989,28 @@ impl FunctionBuilder {
                 }
             },
             Expr::Member(m) => {
+                // translate the object
                 let obj = self.translate_expr(&m.obj)?;
+
                 match &m.prop {
                     MemberProp::Computed(c) => {
+                        // store the object on stack
                         self.bytecode.push(OpCode::StoreTemp { value: obj });
 
+                        // translate the property value
                         let p = self.translate_expr(&c.expr)?;
+
+                        // move the key to r1
                         self.bytecode.push(OpCode::Mov {
                             from: p,
                             to: self.r1,
                         });
 
+                        // read object to r2
                         self.bytecode.push(OpCode::ReadTemp { value: self.r2 });
                         self.bytecode.push(OpCode::ReleaseTemp);
 
+                        // read the field from object
                         self.bytecode.push(OpCode::ReadField {
                             obj: self.r2,
                             field: p,
@@ -1784,7 +2019,10 @@ impl FunctionBuilder {
                         });
                     }
                     MemberProp::Ident(i) => {
+                        // register the static field name
                         let id = self.runtime.register_field_name(&i.sym);
+
+                        // read the field from object
                         self.bytecode.push(OpCode::ReadFieldStatic {
                             obj: obj,
                             result: self.r1,
@@ -1792,7 +2030,10 @@ impl FunctionBuilder {
                         });
                     }
                     MemberProp::PrivateName(p) => {
+                        // register the static field name
                         let id = self.runtime.register_field_name(&format!("#{}", &p.id));
+
+                        // read the field from object
                         self.bytecode.push(OpCode::ReadFieldStatic {
                             obj: obj,
                             result: self.r1,
@@ -1804,19 +2045,25 @@ impl FunctionBuilder {
             Expr::MetaProp(m) => {
                 match m.kind {
                     MetaPropKind::ImportMeta => {
+                        // read import.meta
                         self.bytecode.push(OpCode::ImportMeta { result: self.r1 });
                     }
                     MetaPropKind::NewTarget => {
+                        // read new.target
                         self.bytecode.push(OpCode::NewTarget { result: self.r1 });
                     }
                 };
             }
             Expr::New(n) => {
+                // translate all the arguments and push them on stack
                 if let Some(args) = &n.args {
                     self.translate_args(args)?;
                 }
+
+                // translate the callee
                 let callee = self.translate_expr(&n.callee)?;
 
+                // construct the object
                 self.bytecode.push(OpCode::New {
                     result: self.r1,
                     callee,
@@ -1824,21 +2071,28 @@ impl FunctionBuilder {
                     args_len: n.args.as_ref().map(|n|n.len() as u16).unwrap_or(0)
                 });
 
+                // check if any error has occour
                 self.try_check_error(self.r1);
+
                 return Ok(self.r1);
             }
 
             Expr::Object(o) => {
+                // create the object
                 self.bytecode.push(OpCode::CreateObject { result: self.r3 });
+
+                // store the object on stack
                 self.bytecode.push(OpCode::StoreTemp { value: self.r3 });
 
                 for prop in &o.props {
                     match prop {
                         PropOrSpread::Prop(p) => match p.as_ref() {
+                            // not valid in literal
                             Prop::Assign(a) => {
                                 unreachable!("invalid object literal")
-                            }
+                            },
                             Prop::Getter(g) => {
+                                // create function builder
                                 let mut builder = FunctionBuilder::new_with_context(
                                     self.runtime.clone(),
                                     self.ctx.clone(),
@@ -1847,26 +2101,33 @@ impl FunctionBuilder {
                                     0
                                 );
 
+                                // translate function body
                                 if let Some(v) = &g.body {
                                     for i in &v.stmts {
                                         builder.translate_statement(None, i)?;
                                     }
                                 }
+
+                                // finish function
                                 let id = builder.finish()?;
 
+                                // get any operation needed to be done
                                 self.bytecode.extend(self.ctx.need_done());
 
+                                // create the function
                                 self.bytecode.push(OpCode::CreateFunction {
                                     result: self.r2,
                                     id: id,
                                 });
 
+                                // create the key
                                 let key = self.propname_to_str(&g.key);
                                 let id = self.runtime.register_field_name(&key);
 
                                 // read the object
                                 self.bytecode.push(OpCode::ReadTemp { value: self.r3 });
 
+                                // bind the function to object as a getter
                                 self.bytecode.push(OpCode::BindGetter {
                                     obj: self.r3,
                                     field_id: id,
@@ -1874,13 +2135,17 @@ impl FunctionBuilder {
                                 });
                             }
                             Prop::KeyValue(k) => {
+                                // translate the value
                                 let v = self.translate_expr(&k.value)?;
 
+                                // create the key
                                 let key = self.propname_to_str(&k.key);
                                 let id = self.runtime.register_field_name(&key);
 
                                 // read the object
                                 self.bytecode.push(OpCode::ReadTemp { value: self.r3 });
+
+                                // write value to field
                                 self.bytecode.push(OpCode::WriteFieldStatic {
                                     obj: self.r3,
                                     value: v,
@@ -1888,6 +2153,7 @@ impl FunctionBuilder {
                                 });
                             }
                             Prop::Method(m) => {
+                                // create function builder
                                 let mut builder = FunctionBuilder::new_with_context(
                                     self.runtime.clone(),
                                     self.ctx.clone(),
@@ -1896,10 +2162,13 @@ impl FunctionBuilder {
                                     m.function.params.len()
                                 );
 
+                                // build the function
                                 builder.build_function(&m.function)?;
                                 let id = builder.finish()?;
 
                                 self.bytecode.extend(self.ctx.need_done());
+
+                                // create the function
                                 self.bytecode.push(OpCode::CreateFunction {
                                     result: self.r2,
                                     id: id,
@@ -1911,6 +2180,7 @@ impl FunctionBuilder {
                                 // read the object
                                 self.bytecode.push(OpCode::ReadTemp { value: self.r3 });
 
+                                // write function into field
                                 self.bytecode.push(OpCode::WriteFieldStatic {
                                     obj: self.r3,
                                     value: self.r2,
@@ -1953,12 +2223,16 @@ impl FunctionBuilder {
                                 });
                             }
                             Prop::Shorthand(s) => {
+                                // a in {a, }
+
+                                // get the variable from context
                                 self.bytecode.push(self.ctx.get(&s.to_id(), self.r2));
                                 let id = self.runtime.register_field_name(&s.sym);
 
                                 // read the object
                                 self.bytecode.push(OpCode::ReadTemp { value: self.r3 });
 
+                                // wriet value to field
                                 self.bytecode.push(OpCode::WriteFieldStatic {
                                     obj: self.r3,
                                     value: self.r2,
@@ -1967,8 +2241,13 @@ impl FunctionBuilder {
                             }
                         },
                         PropOrSpread::Spread(s) => {
+                            // translate the value
                             let e = self.translate_expr(&s.expr)?;
+
+                            // read the object
                             self.bytecode.push(OpCode::ReadTemp { value: self.r3 });
+
+                            // extend the object using the value
                             self.bytecode.push(OpCode::ExtendObject {
                                 obj: self.r3,
                                 from: e,
@@ -1976,13 +2255,18 @@ impl FunctionBuilder {
                         }
                     };
                 }
+
+                // read the object to r1
                 self.bytecode.push(OpCode::ReadTemp { value: self.r1 });
                 self.bytecode.push(OpCode::ReleaseTemp);
             }
 
             Expr::OptChain(o) => match &o.base {
+
                 OptChainBase::Member(m) => {
+                    // translate the object
                     let obj = self.translate_expr(&m.obj)?;
+
                     match &m.prop {
                         MemberProp::Computed(c) => {
                             self.bytecode.push(OpCode::StoreTemp { value: obj });
@@ -2516,7 +2800,9 @@ impl FunctionBuilder {
             Expr::TsTypeAssertion(t) => {
                 todo!()
             }
-            Expr::TsSatisfaction(s) => {}
+            Expr::TsSatisfaction(s) => {
+                todo!()
+            }
 
             Expr::JSXElement(e) => {
                 todo!()

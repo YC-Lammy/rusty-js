@@ -1,4 +1,4 @@
-use crate::{types::JValue, JObject};
+use crate::{value::JValue, JObject};
 
 pub trait CustomObject {
     fn get_property(&mut self, name: &str) -> Option<JValue>;

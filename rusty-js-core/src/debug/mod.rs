@@ -6,7 +6,7 @@ use swc_common::SourceFile;
 
 use crate::error::Error;
 use crate::runtime::Runtime;
-use crate::types::JValue;
+use crate::value::JValue;
 
 mod bridge;
 mod llvm;
@@ -194,4 +194,25 @@ fn test3() {
 
     println!("{} ms", t.elapsed().as_secs_f64() * 1000.0);
     Runtime::deattach();
+}
+
+#[test]
+fn test4() {
+    let runtime = Runtime::new();
+
+    runtime.clone().attach();
+
+    let o = runtime.create_native_function(|_ctx, _this, args| {
+        let mut o = std::io::stdout();
+        o.write(args[0].to_string().as_bytes());
+        o.write(b"\n");
+        Ok(JValue::UNDEFINED)
+    });
+
+    runtime.declare_variable("log", o.into());
+
+    runtime.execute("", r#"
+    let r = {a:0, t:4};
+    log(r);
+    "#);
 }

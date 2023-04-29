@@ -1,4 +1,4 @@
-use crate::bultins::flag::PropFlag;
+use crate::bultins::object_property::PropFlag;
 use crate::utils::string_interner::NAMES;
 use crate::Runtime;
 

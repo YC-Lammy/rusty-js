@@ -6,7 +6,7 @@ use std::{
 
 use crate::{
     runtime::{GcFlag, Runtime},
-    types::JValue,
+    value::JValue,
 };
 
 #[derive(Debug, Clone, Copy)]

@@ -1,0 +1,21 @@
+[package]
+name = "libinkwell"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[lib]
+crate-type = ["staticlib"]
+
+[build-dependencies]
+syn = "*"
+
+[dependencies]
+inkwell = { git = "https://github.com/TheDan64/inkwell", branch = "master", features = ["llvm13-0"] }
+libc = "*"
+llvm-sys = "130"
+
+
+[profile.release]
+lto = true

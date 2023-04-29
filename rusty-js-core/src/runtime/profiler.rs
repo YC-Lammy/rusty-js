@@ -1,6 +1,6 @@
 use std::{alloc::Layout};
 
-use crate::{JValue, types::JSType};
+use crate::{JValue, value::JSType};
 
 
 #[repr(C)]

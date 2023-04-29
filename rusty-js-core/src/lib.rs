@@ -4,7 +4,7 @@ pub mod bytecodes;
 mod interpreter;
 //mod clousure_jit;
 pub mod runtime;
-pub mod types;
+pub mod value;
 
 pub mod convertion;
 mod ecma;
@@ -21,8 +21,8 @@ pub use runtime::{ClassID, ConstID, FuncID, RegexID, Runtime, StringID, Template
 
 pub use bultins::{
     bigint::JSBigInt, function::JSContext, object::CustomObject, object::JObject, object::PropKey,
-    object::ToProperyKey, object_builder::ObjectBuilder, promise::Promise, proxy::Proxy, regex,
+    object::ToProperyKey, promise::Promise, proxy::Proxy, regex,
     strings::JSString, symbol::JSymbol, typed_array::TypedArray,
 };
 
-pub use types::JValue;
+pub use value::JValue;

@@ -34,38 +34,6 @@ impl<T> std::ops::Deref for List<T> {
     }
 }
 
-pub struct CombindIterator<I> {
-    iters: Vec<I>,
-    index: usize,
-}
-
-impl<I> CombindIterator<I> {
-    pub fn new(iters: Vec<I>) -> Self {
-        Self { iters, index: 0 }
-    }
-}
-
-impl<I> Iterator for CombindIterator<I>
-where
-    I: Iterator,
-{
-    type Item = I::Item;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        if let Some(i) = self.iters.get_mut(self.index) {
-            match i.next() {
-                Some(v) => Some(v),
-                None => {
-                    self.index += 1;
-                    self.next()
-                }
-            }
-        } else {
-            None
-        }
-    }
-}
-
 #[repr(transparent)]
 pub struct ReferenceRange<T>(std::ops::Range<T>);
 

@@ -1,5 +1,5 @@
 use num_bigint::ToBigInt;
-use num_traits::{FromPrimitive, ToPrimitive, Zero};
+use num_traits::{ToPrimitive, Zero};
 
 use crate::runtime::GcFlag;
 

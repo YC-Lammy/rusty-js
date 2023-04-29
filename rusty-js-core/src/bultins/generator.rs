@@ -6,9 +6,9 @@ use futures::lock::Mutex as FutureMutex;
 use parking_lot::Mutex;
 
 use crate::{baseline, Promise};
-use crate::{error::Error, types::JValue, utils::string_interner::NAMES, JObject, Runtime};
+use crate::{error::Error, value::JValue, utils::string_interner::NAMES, JObject, Runtime};
 
-use super::flag::PropFlag;
+use super::object_property::PropFlag;
 
 pub enum GeneratorResult {
     Await(JValue),

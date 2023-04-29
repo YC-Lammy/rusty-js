@@ -1,6 +1,6 @@
 use std::{any::Any, ops::Range, sync::Arc};
 
-use crate::types::JValue;
+use crate::value::JValue;
 
 #[derive(Debug, Clone)]
 pub enum Error {

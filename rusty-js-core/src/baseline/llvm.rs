@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use inkwell::basic_block::BasicBlock;
 use inkwell::builder::Builder;
 use inkwell::context::Context;
-use inkwell::debug_info::{DebugInfoBuilder, DICompileUnit, DIFile, AsDIScope, DISubprogram};
+//use inkwell::debug_info::{DebugInfoBuilder, DICompileUnit, DIFile, AsDIScope, DISubprogram};
 use inkwell::execution_engine::{ExecutionEngine, JitFunction};
 use inkwell::module::Module;
 use inkwell::types::{FunctionType, StructType, IntType, FloatType};
@@ -24,10 +24,11 @@ pub struct CodeGen<'ctx> {
 
     builder: Builder<'ctx>,
 
-    debug_builder:Option<DebugInfoBuilder<'ctx>>,
-    debug_compiler:Option<DICompileUnit<'ctx>>,
-    debug_file:Option<DIFile<'ctx>>,
-    debug_func:Option<DISubprogram<'ctx>>,
+    // todo: dwarf debugger
+    //debug_builder:Option<DebugInfoBuilder<'ctx>>,
+    //debug_compiler:Option<DICompileUnit<'ctx>>,
+    //debug_file:Option<DIFile<'ctx>>,
+    //debug_func:Option<DISubprogram<'ctx>>,
 
     main_body_block: BasicBlock<'ctx>,
     switch_block: BasicBlock<'ctx>,
@@ -43,7 +44,7 @@ pub struct CodeGen<'ctx> {
     func: FunctionValue<'ctx>,
     registers: [inkwell::values::PointerValue<'ctx>; 3],
     
-    functions:HashMap<&'static str, FunctionValue<'ctx>>,
+    functions:HashMap<&'ctx str, FunctionValue<'ctx>>,
 
     pub speculate_offset: usize,
 
@@ -108,21 +109,21 @@ impl<'ctx> CodeGen<'ctx> {
         let fn_type = i64_array_type.fn_type(
             &[
                 i64_type.into(),
-                i64_type.ptr_type(AddressSpace::Generic).into(),
-                i64_type.ptr_type(AddressSpace::Generic).into(),
+                i64_type.ptr_type(AddressSpace::default()).into(),
+                i64_type.ptr_type(AddressSpace::default()).into(),
                 #[cfg(target_pointer_width = "64")]
                 i64_type.into(),
                 #[cfg(target_pointer_width = "32")]
                 context.i32_type().into(),
-                i64_type.ptr_type(AddressSpace::Generic).into(),
-                i64_type.ptr_type(AddressSpace::Generic).into(),
-                i64_type.ptr_type(AddressSpace::Generic).into(),
-                context.i32_type().ptr_type(AddressSpace::Generic).into(),
+                i64_type.ptr_type(AddressSpace::default()).into(),
+                i64_type.ptr_type(AddressSpace::default()).into(),
+                i64_type.ptr_type(AddressSpace::default()).into(),
+                context.i32_type().ptr_type(AddressSpace::default()).into(),
                 i64_type.into(),
                 i64_type.into(),
                 i64_type.into(),
                 i64_type.into(),
-                context.i16_type().ptr_type(AddressSpace::Generic).into()
+                context.i16_type().ptr_type(AddressSpace::default()).into()
             ],
             false,
         );
@@ -135,9 +136,9 @@ impl<'ctx> CodeGen<'ctx> {
                 &[
                     i64_type.into(),
                     i64_type.into(),
-                    i64_type.ptr_type(AddressSpace::Generic).into(),
-                    i64_type.ptr_type(AddressSpace::Generic).into(),
-                    binary_result_ty.ptr_type(AddressSpace::Generic).into()
+                    i64_type.ptr_type(AddressSpace::default()).into(),
+                    i64_type.ptr_type(AddressSpace::default()).into(),
+                    binary_result_ty.ptr_type(AddressSpace::default()).into()
                 ],
                 false,
             );
@@ -151,46 +152,42 @@ impl<'ctx> CodeGen<'ctx> {
             .to_string();
         let func = module.add_function(&name, fn_type, None);
         
-        let (debug_builder, debug_compile, debug_file, debug_func) = if false{
-            let (debug_builder, debug_compile) = module.create_debug_info_builder(
-                true, 
-                inkwell::debug_info::DWARFSourceLanguage::C, 
-                "JS\0", 
-                "JIT\0", 
-                "YC\0", 
-                false, 
-                "", 
-                0, 
-                "", 
-                inkwell::debug_info::DWARFEmissionKind::Full, 
-                0, 
-                false, 
-                false, 
-                "", 
-                ""
-            );
-            
-            let debug_file = debug_builder.create_file("jit", &name);
-            let sub = debug_builder.create_subroutine_type(debug_file, None, &[], 0);
-
-            let debug_func = debug_builder.create_function(
-                debug_file.as_debug_info_scope(),
-                &name,
-                None,
-                debug_file,
-                0,
-                sub,
-                false,
-                true,
-                0,
-                0,
-                false
-            );
-            (Some(debug_builder), Some(debug_compile), Some(debug_file), Some(debug_func))
-        } else{
-            (None, None, None, None)
-        };
+        /*
+        let (debug_builder, debug_compile) = module.create_debug_info_builder(
+            true, 
+            inkwell::debug_info::DWARFSourceLanguage::C, 
+            "JS\0", 
+            "JIT\0", 
+            "YC\0", 
+            false, 
+            "", 
+            0, 
+            "", 
+            inkwell::debug_info::DWARFEmissionKind::Full, 
+            0, 
+            false, 
+            false, 
+            "", 
+            ""
+        );
         
+        let debug_file = debug_builder.create_file("jit", &name);
+        let sub = debug_builder.create_subroutine_type(debug_file, None, &[], 0);
+
+        let debug_func = debug_builder.create_function(
+            debug_file.as_debug_info_scope(),
+            &name,
+            None,
+            debug_file,
+            0,
+            sub,
+            false,
+            true,
+            0,
+            0,
+            false
+        );
+        */
 
         let basic_block = context.append_basic_block(func, "entry\0");
 
@@ -257,10 +254,11 @@ impl<'ctx> CodeGen<'ctx> {
             module: module,
             execution_engine: engine,
             builder: builder,
-            debug_builder:debug_builder,
-            debug_compiler:debug_compile,
-            debug_file:debug_file,
-            debug_func:debug_func,
+
+            //debug_builder:debug_builder,
+            //debug_compiler:debug_compile,
+            //debug_file:debug_file,
+            //debug_func:debug_func,
 
             error_exit_block: error_exit_block,
             switch_block: switch_block,
@@ -343,8 +341,8 @@ impl<'ctx> CodeGen<'ctx> {
 
         let size = self.speculate_offset;
 
-        let f:JitFunction<JSJITFunction> = unsafe { self.execution_engine.get_function(&self.name).unwrap() };
-        let f = unsafe{std::mem::transmute(f)};
+        let f:JitFunction<'_, JSJITFunction> = unsafe { self.execution_engine.get_function(&self.name).unwrap() };
+        let f:JitFunction<'static, JSJITFunction> = unsafe{std::mem::transmute(f)};
 
         super::Function{
             profiler:Profiler::new(size),
@@ -359,7 +357,7 @@ impl<'ctx> CodeGen<'ctx> {
         for i in values{
             let offset = self.i64_ty.const_int(self.speculate_offset as u64 * 2, false);
             let ptr = self.builder.build_int_add(profiler, offset, "add\0");
-            let ptr = self.builder.build_int_to_ptr(ptr, self.context.i16_type().ptr_type(AddressSpace::Generic), "int_to_ptr\0");
+            let ptr = self.builder.build_int_to_ptr(ptr, self.context.i16_type().ptr_type(AddressSpace::default()), "int_to_ptr\0");
 
             let shift = self.i64_ty.const_int(48, false);
             let flag = self.builder.build_right_shift(*i, shift, false, "shift\0");
@@ -423,6 +421,18 @@ impl<'ctx> CodeGen<'ctx> {
         self.builder.position_at_end(exit);
     }
 
+    fn get_or_register_function(&mut self, name:&'ctx str, func: usize, ty:FunctionType<'ctx>) -> FunctionValue<'ctx>{
+        match self.functions.get(name){
+            Some(f) => *f,
+            None => {
+                let function = self.module.add_function(name, ty, None);
+                self.execution_engine.add_global_mapping(&function, func);
+                self.functions.insert(name, function);
+                function
+            }
+        }
+    }
+
     fn binary<F0>(
         &mut self,
         left: Register,
@@ -468,24 +478,8 @@ impl<'ctx> CodeGen<'ctx> {
         // slow path
         self.builder.position_at_end(slow_path);
 
-        let func = match self.functions.get(&name){
-            Some(f) => *f,
-            None => {
-                match self.module.get_function(name) {
-                    Some(f) => {
-                        self.functions.insert(name, f);
-                        f
-                    },
-                    None => {
-                        let f = self.module.add_function(name, self.binary_fn_type, None);
-                        self.execution_engine
-                            .add_global_mapping(&f, slow_fn as usize);
-                        self.functions.insert(name, f);
-                        f
-                    }
-                }
-            }
-        };
+        // get or register the slow function
+        let func = self.get_or_register_function(name, slow_fn as usize, self.binary_fn_type);
 
         // get op_stack
         let stack = self.func.get_nth_param(5).unwrap().into_pointer_value();
@@ -565,25 +559,10 @@ impl<'ctx> CodeGen<'ctx> {
         // slow path
         self.builder.position_at_end(slow_path);
 
-        let func = match self.functions.get(&name){
-            Some(f) => *f,
-            None => {
-                match self.module.get_function(name) {
-                    Some(f) => {
-                        self.functions.insert(name, f);
-                        f
-                    },
-                    None => {
-                        let f = self.module.add_function(name, self.binary_fn_type, None);
-                        self.execution_engine
-                            .add_global_mapping(&f, slow_fn as usize);
-                        self.functions.insert(name, f);
-                        f
-                    }
-                }
-            }
-        };
+        // get or register the slow function
+        let func = self.get_or_register_function(name, slow_fn as usize, self.binary_fn_type);
 
+        // get the stack
         let stack = self.func.get_nth_param(5).unwrap().into_pointer_value();
         let runtime = self.func.get_nth_param(1).unwrap().into_pointer_value();
 
@@ -822,13 +801,17 @@ impl<'ctx> CodeGen<'ctx> {
             //            Memory
             ////////////////////////////////////////////////////
             OpCode::ReadParam { result, index } => {
+                // load the stack pointer
                 let ptr = self.func.get_nth_param(2).unwrap().into_pointer_value();
+                // load the number of args
                 let argc = self.func.get_nth_param(3).unwrap().into_int_value();
 
+                // create an undefined value
                 let undefined = self
                     .i64_ty
                     .const_int(JValue::UNDEFINED_TAG, false);
 
+                // calculate the pointer to the param
                 let ptr = self
                     .builder
                     .build_ptr_to_int(ptr, self.i64_ty, "ptr\0");
@@ -838,12 +821,14 @@ impl<'ctx> CodeGen<'ctx> {
                 let ptr = self.builder.build_int_add(ptr, offset, "ptr\0");
                 let ptr = self.builder.build_int_to_ptr(
                     ptr,
-                    self.i64_ty.ptr_type(AddressSpace::Generic),
+                    self.i64_ty.ptr_type(AddressSpace::default()),
                     "ptr\0",
                 );
 
+                // load the value of param
                 let value = self.builder.build_load(ptr, "load_param").into_int_value();
 
+                // load the index of param
                 let index = self.i64_ty.const_int(index as u64, false);
 
                 // if argc is greater than index, use the loaded value else, undefined
@@ -853,32 +838,199 @@ impl<'ctx> CodeGen<'ctx> {
                     index,
                     "index\0",
                 );
+
+                // select value or undefined
                 let value = self
                     .builder
                     .build_select(lt, value, undefined, "select\0")
                     .into_int_value();
 
+                // store it on register
                 self.store_reg(result, value);
             }
             OpCode::CollectParam { result, start } => {
-                todo!()
+                // load the stack pointer
+                let ptr = self.func.get_nth_param(2).unwrap().into_pointer_value();
+                // load the number of args
+                let argc = self.func.get_nth_param(3).unwrap().into_int_value();
+
+                // load the start index
+                let start_index = self.i64_ty.const_int(start as u64, false);
+
+                let loop_header = self.context.append_basic_block(self.func, "collect_param_header\0");
+                let loop_body = self.context.append_basic_block(self.func, "collect_param_body");
+                let loop_exit = self.context.append_basic_block(self.func, "collect_param_exit\0");
+                let alternative = self.context.append_basic_block(self.func, "collect_param_empty\0");
+                let exit = self.context.append_basic_block(self.func, "exit\0");
+
+                // check if the number of params is larger then start index
+                let is_param = self.builder.build_int_compare(
+                    inkwell::IntPredicate::UGT,
+                    argc,
+                    start_index,
+                    "index\0",
+                );
+
+                // goto exit if there is no param left
+                self.builder.build_conditional_branch(is_param, loop_header, alternative);
+
+                // header block
+                self.builder.position_at_end(loop_header);
+
+                // get the length of the remaining params
+                let array_len = self.builder.build_int_sub(argc, start_index, "collect_params_len\0");
+
+                // allocate array for storing valuess
+                let array = self.builder.build_array_malloc(self.i64_ty, array_len, "array_malloc\0").unwrap();
+
+                // allocate stack for index counting
+                let array_index = self.builder.build_alloca(self.i64_ty, "allocate\0");
+                self.builder.build_store(array_index, self.i64_ty.const_zero());
+
+                // allocate stack for loop count
+                let remain_loops = self.builder.build_alloca(self.i64_ty, "loop_count\0");
+                self.builder.build_store(remain_loops, array_len);
+
+                // allocate stack for the param index
+                let stack_offset = self.builder.build_alloca(self.i64_ty, "index\0");
+                self.builder.build_store(stack_offset, self.i64_ty.const_int(start as u64 * JValue::SIZE as u64, false));
+
+                // jump to loop body
+                self.builder.build_unconditional_branch(loop_body);
+
+                // enter the loop body
+                self.builder.position_at_end(loop_body);
+
+                // load the offset to stack
+                let offset = self.builder.build_load(stack_offset, "load_offset\0").into_int_value();
+                
+                // calculate the offset on stack for the next loop
+                let next_offset = self.builder.build_int_add(offset, self.i64_ty.const_int(JValue::SIZE as u64, false), "offset_add\0");
+                self.builder.build_store(stack_offset, next_offset);
+
+                // calculate the pointer to the param
+                let ptr = self
+                    .builder
+                    .build_ptr_to_int(ptr, self.i64_ty, "ptr\0");
+                let ptr = self.builder.build_int_add(ptr, offset, "ptr\0");
+                let ptr = self.builder.build_int_to_ptr(
+                    ptr,
+                    self.i64_ty.ptr_type(AddressSpace::default()),
+                    "ptr\0",
+                );
+
+                // load the value of param
+                let value = self.builder.build_load(ptr, "load_param\0").into_int_value();
+
+                // load the array index
+                let array_index_= self.builder.build_load(array_index, "load_array_index\0").into_int_value();
+
+                // calculate the next array index and store it into stack
+                let new_array_index = self.builder.build_int_add(array_index_, self.i64_ty.const_int(JValue::SIZE as u64, false), "array_index_add\0");
+                self.builder.build_store(array_index, new_array_index);
+
+                // calculate the pointer with offset
+                let array_ptr = self.builder.build_ptr_to_int(array, self.i64_ty, "ptr_to_int\0");
+                let array_ptr = self.builder.build_int_add(array_ptr, array_index_, "array_ptr_add\0");
+                let array_ptr = self.builder.build_int_to_ptr(array_ptr, self.i64_ty.ptr_type(Default::default()), "array_ptr_from_int\0");
+
+                // store the value into array
+                self.builder.build_store(array_ptr, value);
+                
+                // load the remaining loops
+                let remain = self.builder.build_load(remain_loops, "load_remain\0").into_int_value();
+
+                // sub remain by 1
+                let new_remain = self.builder.build_int_sub(remain, self.i64_ty.const_int(1, false), "sub_loop_count\0");
+                self.builder.build_store(remain_loops, new_remain);
+
+                let is_zero = self.builder.build_int_compare(inkwell::IntPredicate::EQ, new_remain, self.i64_ty.const_zero(), "is_zero\0");
+
+                // jump to exit if remain is zero, else jump to loop body again
+                self.builder.build_conditional_branch(is_zero, loop_exit, loop_body);
+
+                // enter the loop exit
+                self.builder.position_at_end(loop_exit);
+
+                let func = self.get_or_register_function(
+                    "create_array", 
+                    operations::create_array as usize, 
+                    self.context.i64_type().fn_type(
+                        &[
+                            self.i64_ty.ptr_type(Default::default()).into(),
+                            self.i64_ty.into(),
+                        ], 
+                        false
+                    )
+                );
+
+                // call create array
+                let re = self.builder.build_call(
+                    func, 
+                    &[
+                        array.into(),
+                        array_len.into(),
+                    ], 
+                    "call_create_array\0"
+                );
+                let re = re.try_as_basic_value().left().unwrap().into_int_value();
+
+                // store the result to register
+                self.store_reg(result, re);
+
+                // free the array
+                self.builder.build_free(array);
+
+                // branch to exit
+                self.builder.build_unconditional_branch(exit);
+                
+                // //////////////////////////////////////////////////////////
+                //  in the alternative branch, we create an empty array and jump to exit
+                //
+                self.builder.position_at_end(alternative);
+
+                let func = self.get_or_register_function(
+                    "create_array", 
+                    operations::create_array as usize, 
+                    self.context.i64_type().fn_type(
+                        &[
+                            self.i64_ty.ptr_type(Default::default()).into(),
+                            self.i64_ty.into(),
+                        ], 
+                        false
+                    )
+                );
+
+                // call create array
+                let re = self.builder.build_call(
+                    func, 
+                    &[
+                        array.into(),
+                        self.i64_ty.const_zero().into(),
+                    ], 
+                    "call_create_array\0"
+                );
+                let re = re.try_as_basic_value().left().unwrap().into_int_value();
+
+                // store the result to register
+                self.store_reg(result, re);
+
+                self.builder.build_unconditional_branch(exit);
+                
+                // branch to exit
+                self.builder.position_at_end(exit);
             }
             OpCode::ReadFromStack {
                 result,
                 stack_offset,
             } => {
-                /*
-                let value = self.builder.build_load(self.stack_alloc[&stack_offset], "load_from_stack\0").into_int_value();
-                self.store_reg(result, value);
-                */
 
-                
                 let stack = self.func.get_nth_param(4).unwrap().into_pointer_value();
                 let offset = self.i64_ty.const_int(
                     stack_offset as u64 * std::mem::size_of::<JValue>() as u64,
                     false,
                 );
-                let ptr_ty = self.i64_ty.ptr_type(AddressSpace::Generic);
+                let ptr_ty = self.i64_ty.ptr_type(AddressSpace::default());
 
                 let stack =
                     self.builder
@@ -902,7 +1054,7 @@ impl<'ctx> CodeGen<'ctx> {
                     stack_offset as u64 * std::mem::size_of::<JValue>() as u64,
                     false,
                 );
-                let ptr_ty = self.i64_ty.ptr_type(AddressSpace::Generic);
+                let ptr_ty = self.i64_ty.ptr_type(AddressSpace::default());
 
                 let stack =
                     self.builder
@@ -1004,8 +1156,8 @@ impl<'ctx> CodeGen<'ctx> {
                 self.store_reg(result, value);
             }
 
-            OpCode::CreateArg { stack_offset, len } => {
-
+            OpCode::CreateArg { stack_offset:_, len:_ } => {
+                // does nothing
             }
             OpCode::PushArg { value, stack_offset } => {
                 let stack = self.func.get_nth_param(4).unwrap().into_pointer_value();
@@ -1013,7 +1165,7 @@ impl<'ctx> CodeGen<'ctx> {
                     stack_offset as u64 * std::mem::size_of::<JValue>() as u64,
                     false,
                 );
-                let ptr_ty = self.i64_ty.ptr_type(AddressSpace::Generic);
+                let ptr_ty = self.i64_ty.ptr_type(AddressSpace::default());
 
                 let stack =
                     self.builder
@@ -1049,7 +1201,7 @@ impl<'ctx> CodeGen<'ctx> {
                 #[cfg(target_pointer_width = "32")]
                 let argc = self.context.i32_type().const_int(args_len as u64, false);
 
-                let ptr_ty = self.i64_ty.ptr_type(AddressSpace::Generic);
+                let ptr_ty = self.i64_ty.ptr_type(AddressSpace::default());
 
                 let runtime = self.func.get_nth_param(1).unwrap().into_pointer_value();
 
@@ -1070,14 +1222,14 @@ impl<'ctx> CodeGen<'ctx> {
                         let ty = self.context.void_type().fn_type(
                             &[
                                 self.i64_ty.into(),
-                                self.i64_ty.ptr_type(AddressSpace::Generic).into(),
+                                self.i64_ty.ptr_type(AddressSpace::default()).into(),
                                 self.i64_ty.into(),
-                                self.i64_ty.ptr_type(AddressSpace::Generic).into(),
+                                self.i64_ty.ptr_type(AddressSpace::default()).into(),
                                 #[cfg(target_pointer_width = "64")]
                                 self.i64_ty.into(),
                                 #[cfg(target_pointer_width = "32")]
                                 self.context.i32_type().into(),
-                                self.binary_fn_result_ty.ptr_type(AddressSpace::Generic).into()
+                                self.binary_fn_result_ty.ptr_type(AddressSpace::default()).into()
                             ], 
                             false
                         );
@@ -1143,7 +1295,7 @@ impl<'ctx> CodeGen<'ctx> {
                 #[cfg(target_pointer_width = "32")]
                 let argc = self.context.i32_type().const_int(args_len as u64, false);
 
-                let ptr_ty = self.i64_ty.ptr_type(AddressSpace::Generic);
+                let ptr_ty = self.i64_ty.ptr_type(AddressSpace::default());
 
                 let runtime = self.func.get_nth_param(1).unwrap().into_pointer_value();
 
@@ -1164,13 +1316,13 @@ impl<'ctx> CodeGen<'ctx> {
                         let ty = self.context.void_type().fn_type(
                             &[
                                 self.i64_ty.into(),
-                                self.i64_ty.ptr_type(AddressSpace::Generic).into(),
-                                self.i64_ty.ptr_type(AddressSpace::Generic).into(),
+                                self.i64_ty.ptr_type(AddressSpace::default()).into(),
+                                self.i64_ty.ptr_type(AddressSpace::default()).into(),
                                 #[cfg(target_pointer_width = "64")]
                                 self.i64_ty.into(),
                                 #[cfg(target_pointer_width = "32")]
                                 self.context.i32_type().into(),
-                                self.binary_fn_result_ty.ptr_type(AddressSpace::Generic).into()
+                                self.binary_fn_result_ty.ptr_type(AddressSpace::default()).into()
                             ], 
                             false
                         );
@@ -1231,7 +1383,7 @@ impl<'ctx> CodeGen<'ctx> {
                     Some(v) => *v,
                     None => {
                         let ty = self.i64_ty.fn_type(&[
-                            self.i64_ty.ptr_type(AddressSpace::Generic).into()
+                            self.i64_ty.ptr_type(AddressSpace::default()).into()
                         ], false);
 
                         let fun = self.module.add_function("new_target\0", ty, None);
@@ -1251,7 +1403,7 @@ impl<'ctx> CodeGen<'ctx> {
                     Some(v) => *v,
                     None => {
                         let ty = self.i64_ty.fn_type(&[
-                            self.i64_ty.ptr_type(AddressSpace::Generic).into()
+                            self.i64_ty.ptr_type(AddressSpace::default()).into()
                         ], false);
 
                         let fun = self.module.add_function("import_meta\0", ty, None);

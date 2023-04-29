@@ -10,6 +10,11 @@ opt-level = 3
 incremental = true  
 codegen-units = 16
 
+[build-dependencies]
+flate2 = "1.0"
+ureq = "2.6"
+tar = "0.4"
+
 [dependencies]
 rusty-js-macros = {version = "*", path = "../rusty-js-macros"}
 
@@ -24,7 +29,6 @@ cranelift-jit = "0.88.2"
 cranelift-interpreter = "0.88.2"
 
 inkwell = { git = "https://github.com/TheDan64/inkwell", branch = "master", features = ["llvm13-0"] }
-
 #wasmer = "2.3.0"
 
 futures = "*"

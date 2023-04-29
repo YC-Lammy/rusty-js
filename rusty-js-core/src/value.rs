@@ -15,6 +15,7 @@ use crate::utils::string_interner::{NAMES, SYMBOLS};
 #[derive(Debug, Clone, Copy, Hash, PartialEq, Eq, PartialOrd, Ord)]
 pub struct JSType(pub u8);
 
+#[allow(non_upper_case_globals)]
 impl JSType {
     pub const Null: Self = Self(0b00000001);
     pub const Undefined: Self = Self(0b00000010);
@@ -79,10 +80,10 @@ impl JValue {
     const MASK_OBJECT: u64 = 0b1000000000001001000000000000000000000000000000000000000000000000;
     const MASK_STRING: u64 = 0b1000000000001010000000000000000000000000000000000000000000000000;
     const MASK_BIGINT: u64 = 0b1000000000001011000000000000000000000000000000000000000000000000;
-    const MASK_1: u64 = 0b1000000000001100000000000000000000000000000000000000000000000000;
-    const MASK_2: u64 = 0b1000000000001101000000000000000000000000000000000000000000000000;
-    const MASK_3: u64 = 0b1000000000001110000000000000000000000000000000000000000000000000;
-    const MASK_4: u64 = 0b1000000000001111000000000000000000000000000000000000000000000000;
+    //const MASK_1: u64 = 0b1000000000001100000000000000000000000000000000000000000000000000;
+    //const MASK_2: u64 = 0b1000000000001101000000000000000000000000000000000000000000000000;
+    //const MASK_3: u64 = 0b1000000000001110000000000000000000000000000000000000000000000000;
+    //const MASK_4: u64 = 0b1000000000001111000000000000000000000000000000000000000000000000;
 
     pub const FALSE_TAG: u64 = Self::MASK_FALSE | Self::NAN_BITS;
     pub const TRUE_TAG: u64 = Self::MASK_TRUE | Self::NAN_BITS;
@@ -1194,6 +1195,10 @@ impl JValue {
         self.is_loosely_equal(rhs, ctx)
     }
 
+    pub fn eqeqeq(self, rhs: Self) -> bool{
+        self.to_bits() == rhs.to_bits()
+    }
+
     pub fn get_property<K: ToProperyKey>(self, key: K, ctx: JSContext) -> Result<Self, Self> {
         if let Some(obj) = self.as_object() {
             return obj.get_property(key, ctx);
@@ -1309,21 +1314,4 @@ impl JValue {
             return Err(Error::CallOnNonFunction.into());
         }
     }
-}
-
-#[test]
-fn test_jvalue_size() {
-    assert!(std::mem::size_of::<JValue>() == 16);
-}
-
-#[test]
-fn iadd() {
-    let a = JValue::create_int(87389);
-    let b = JValue::create_int(632754);
-
-    println!("{:#b}", a.0 + b.as_int_unchecked() as u64);
-    println!(
-        "{:#b}",
-        JValue::create_int(a.as_int_unchecked() + b.as_int_unchecked()).0
-    );
 }

@@ -4,7 +4,7 @@ use crate::bultins::function::CaptureStack;
 use crate::bultins::object::JObject;
 use crate::error::Error;
 use crate::runtime::{FuncID, Runtime, TemplateID};
-use crate::types::JValue;
+use crate::value::JValue;
 use crate::utils::iterator::JSIterator;
 use crate::utils::string_interner::NAMES;
 use crate::{JSContext, PropKey, ToProperyKey};
@@ -16,6 +16,16 @@ pub struct Result(pub JValue, pub bool);
 impl Default for Result{
     fn default() -> Self {
         Self(JValue::UNDEFINED, false)
+    }
+}
+
+impl Into<std::result::Result<JValue, JValue>> for Result{
+    fn into(self) -> std::result::Result<JValue, JValue> {
+        if self.1{
+            Err(self.0)
+        } else{
+            Ok(self.0)
+        }
     }
 }
 
@@ -346,6 +356,14 @@ pub unsafe fn create_function(id: u32, capture_stack: *mut CaptureStack) -> JVal
     let func = runtime.get_function(FuncID(id)).unwrap();
     let ins = func.create_instance_with_capture(None, cap);
     JObject::with_function(ins).into()
+}
+
+pub unsafe fn create_array(values: *mut JValue, len: u64) -> JValue{
+    let values = std::slice::from_raw_parts_mut(values, len as usize);
+
+    let array = values.iter().map(|v|(Default::default(), *v)).collect();
+    let o = JObject::with_array(array);
+    JValue::create_object(o)
 }
 
 pub unsafe fn bind_class_super(

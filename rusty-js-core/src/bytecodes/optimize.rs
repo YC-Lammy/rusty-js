@@ -7,6 +7,9 @@ use crate::{
 };
 
 pub fn optimize(mut codes: Vec<OpCode>) -> Vec<OpCode> {
+    for i in 0..codes.len(){
+        println!("{}: {:?}", i, &codes[i]);
+    }
     codes = remove_unreachable(codes);
     //codes = remove_unuse_operations(codes);
     //codes = inline_static_function(codes); //todo: bugs to be fixed
@@ -20,9 +23,7 @@ pub fn optimize(mut codes: Vec<OpCode>) -> Vec<OpCode> {
 
     codes = resolve_jump_locations(codes);
 
-    //for i in 0..codes.len(){
-    //    println!("{}: {:?}", i, &codes[i]);
-    //}
+    
 
     return codes;
 }
@@ -190,6 +191,8 @@ fn remove_unused_temp(mut codes: Vec<OpCode>) -> Vec<OpCode> {
                     }
                     codes.remove(i);
                     codes.remove(idx);
+                    i -= 2;
+                    
                 } else if use_reg != [true; 3] {
                     let mut not_used_reg = 0;
 
@@ -211,6 +214,7 @@ fn remove_unused_temp(mut codes: Vec<OpCode>) -> Vec<OpCode> {
                         };
                     }
                     codes.remove(i);
+                    i -= 1;
                 }
             }
             code => {

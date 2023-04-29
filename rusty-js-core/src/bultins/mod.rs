@@ -1,12 +1,10 @@
 pub mod bigint;
 pub mod class;
 pub mod custom_object;
-pub mod flag;
+pub mod object_property;
 pub mod function;
-pub mod function_object;
 pub mod generator;
 pub mod object;
-pub mod object_builder;
 pub mod promise;
 pub mod proxy;
 pub mod regex;

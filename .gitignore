@@ -1,3 +1,5 @@
 */target
 */Cargo.lock
 */test
+*/llvm-13.0.0
+llvm

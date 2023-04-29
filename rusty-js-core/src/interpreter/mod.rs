@@ -4,13 +4,13 @@ use futures::Future;
 use fxhash::FxHashMap;
 use likely_stable::likely;
 
-use crate::bultins::flag::PropFlag;
+use crate::bultins::object_property::PropFlag;
 use crate::bultins::function::CaptureStack;
 use crate::bultins::object::JObject;
 use crate::bytecodes::{Block, OpCode, Register};
 use crate::error::Error;
 use crate::runtime::Runtime;
-use crate::types::JValue;
+use crate::value::JValue;
 use crate::utils::iterator::JSIterator;
 use crate::utils::string_interner::{NAMES, SYMBOLS};
 use crate::{operations, JSContext, Promise, PropKey, ToProperyKey};

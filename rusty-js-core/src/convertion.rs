@@ -2,7 +2,7 @@
 use crate::bultins::object::JObject;
 use crate::bultins::strings::JSString;
 use crate::error::Error;
-use crate::types::*;
+use crate::value::*;
 
 impl From<bool> for JValue {
     fn from(b: bool) -> Self {

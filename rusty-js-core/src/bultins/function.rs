@@ -5,10 +5,10 @@ use crate::baseline;
 use crate::bytecodes::OpCode;
 use crate::interpreter::{clousure, Interpreter};
 use crate::runtime::{Runtime, DEFAULT_STACK_SIZE};
-use crate::types::JValue;
+use crate::value::JValue;
 use crate::utils::string_interner::NAMES;
 
-use super::flag::PropFlag;
+use super::object_property::PropFlag;
 use super::object::{JObject, JObjectValue};
 
 #[derive(Clone)]
@@ -292,9 +292,15 @@ impl JSFunction {
             let bytecodes = self.bytecodes.clone();
 
             rt.worker_task_sender.send(Box::new(move ||{
-                let ctx = unsafe { std::mem::transmute_copy(&&runtime.baseline_context) };
-                let module = unsafe { std::mem::transmute_copy(&&runtime.baseline_module) };
-                let engine = unsafe { std::mem::transmute_copy(&runtime.baseline_engine.as_ref().unwrap()) };
+                // todo: identify the static borrow and use arc instead
+                let ctx_a= runtime.baseline_context.clone();
+                let module_a = runtime.baseline_module.clone();
+                let engine_a = runtime.baseline_engine.as_ref().unwrap().clone();
+
+                let ctx = unsafe{std::mem::transmute_copy(&ctx_a.as_ref())};
+                let module = unsafe{std::mem::transmute_copy(&module_a.as_ref())};
+                let engine = unsafe{std::mem::transmute_copy(&engine_a.as_ref())};
+
                 let mut codegen = baseline::llvm::CodeGen::new(
                     ctx,
                     module,
@@ -307,5 +313,6 @@ impl JSFunction {
                 }
             })).expect("failed to send task");
         }
+
     }
 }

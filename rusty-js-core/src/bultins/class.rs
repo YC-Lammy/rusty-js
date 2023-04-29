@@ -4,13 +4,13 @@ use std::sync::Arc;
 use crate::{
     error::Error,
     operations,
-    types::JValue,
+    value::JValue,
     utils::{nohasher, string_interner::NAMES},
     JObject, JSContext, PropKey, Runtime,
 };
 
 use super::{
-    flag::PropFlag,
+    object_property::PropFlag,
     function::{CaptureStack, JSFunction, JSFunctionInstance},
     object::JObjectValue,
 };

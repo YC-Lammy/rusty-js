@@ -1,4 +1,4 @@
-use crate::{bultins::flag::PropFlag, types::JValue, JObject, JSContext, Runtime};
+use crate::{bultins::object_property::PropFlag, value::JValue, JObject, JSContext, Runtime};
 
 use crate::utils::string_interner::NAMES;
 

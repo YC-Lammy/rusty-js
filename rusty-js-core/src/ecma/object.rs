@@ -1,7 +1,7 @@
 use crate::bultins::object::JObjectValue;
 use crate::error::Error;
 use crate::utils::string_interner::NAMES;
-use crate::{types::JValue, JSContext};
+use crate::{value::JValue, JSContext};
 use crate::{JObject, JSymbol, Runtime};
 
 macro_rules! builtin {

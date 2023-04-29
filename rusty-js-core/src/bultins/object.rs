@@ -9,16 +9,14 @@ use parking_lot::RwLock;
 use crate::error::Error;
 use crate::runtime::Runtime;
 use crate::runtime::{GcFlag, ModuleId};
-use crate::types::JValue;
+use crate::value::JValue;
 use crate::{JSBigInt, JSContext};
 
-use crate::utils::nohasher::NoHasherBuilder;
 use crate::utils::string_interner::NAMES;
 
 use super::class::JSClassInstance;
 use super::function::JSFunctionInstance;
 use super::generator::JSGenerator;
-use super::object_builder::ObjectBuilder;
 use super::promise::Promise;
 use super::proxy::Proxy;
 use super::regex::RegExp;
@@ -26,55 +24,8 @@ use super::strings::JSString;
 use super::symbol::JSymbol;
 use super::typed_array::TypedArray;
 
-use super::flag::PropFlag;
+pub use super::object_property::*;
 
-#[derive(Hash, Clone, Copy, PartialEq, Eq)]
-pub struct PropKey(pub(crate) u32);
-
-pub trait ToProperyKey {
-    fn to_key(&self, runtime: &Runtime) -> PropKey;
-}
-
-impl ToProperyKey for PropKey {
-    fn to_key(&self, _runtime: &Runtime) -> PropKey {
-        return *self;
-    }
-}
-
-impl ToProperyKey for JValue {
-    fn to_key(&self, runtime: &Runtime) -> PropKey {
-        if let Some(s) = self.as_string() {
-            let id = runtime.register_field_name(s.as_ref());
-            return PropKey(id);
-        } else {
-            let s = self.to_string();
-            let id = runtime.register_field_name(&s);
-            return PropKey(id);
-        }
-    }
-}
-
-impl<S> ToProperyKey for S
-where
-    S: AsRef<str>,
-{
-    fn to_key(&self, runtime: &Runtime) -> PropKey {
-        let id = runtime.register_field_name(self.as_ref());
-        PropKey(id)
-    }
-}
-
-#[derive(Clone, Copy)]
-pub struct PropCell {
-    pub flag: PropFlag,
-    /// value acts as getter when flag has getter
-    pub value: JValue,
-    pub setter: JValue,
-}
-
-pub type PropMap = HashMap<PropKey, PropCell, NoHasherBuilder>;
-
-#[allow(unused)]
 /// helper function for hashing
 fn hash_<T>(v: T) -> u64
 where

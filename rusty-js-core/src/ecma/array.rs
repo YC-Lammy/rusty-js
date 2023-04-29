@@ -1,7 +1,7 @@
 use crate::{
-    bultins::flag::PropFlag,
+    bultins::object_property::PropFlag,
     error::Error,
-    types::JValue,
+    value::JValue,
     utils::string_interner::{NAMES, SYMBOLS},
     JObject, JSContext, Runtime,
 };

@@ -35,7 +35,7 @@ use crate::bultins::object::{JObject, JObjectInner};
 use crate::bultins::strings::JSString;
 use crate::bultins::JSBigInt;
 use crate::bytecodes::function_builder_context::FunctionBuilderContext;
-use crate::types::JValue;
+use crate::value::JValue;
 use crate::utils::string_interner::StringInterner;
 use crate::utils::string_interner::NAMES;
 
@@ -200,9 +200,9 @@ pub struct Runtime {
 
     pub(crate) worker_task_sender: crossbeam_channel::Sender<Box<dyn FnOnce() + Sync + Send>>,
 
-    pub(crate) baseline_context: inkwell::context::Context,
-    pub(crate) baseline_module: inkwell::module::Module<'static>,
-    pub(crate) baseline_engine: Option<inkwell::execution_engine::ExecutionEngine<'static>>,
+    pub(crate) baseline_context: Arc<inkwell::context::Context>,
+    pub(crate) baseline_module: Arc<inkwell::module::Module<'static>>,
+    pub(crate) baseline_engine: Option<Arc<inkwell::execution_engine::ExecutionEngine<'static>>>,
 }
 
 unsafe impl Sync for Runtime {}
@@ -292,9 +292,9 @@ impl Runtime {
 
             worker_task_sender: worker_send,
 
-            baseline_context: baseline_context,
-            baseline_engine: baseline_engine,
-            baseline_module: baseline_module,
+            baseline_context: Arc::new(baseline_context),
+            baseline_engine: Some(Arc::new(baseline_engine)),
+            baseline_module: Arc::new(baseline_module),
         });
 
         runtime.to_mut().weak_ref = Some(Arc::downgrade(&runtime));
@@ -1169,17 +1169,17 @@ impl Runtime {
         obj.insert_property(
             NAMES["prototype"],
             prototype.into(),
-            bultins::flag::PropFlag::NONE,
+            bultins::object_property::PropFlag::NONE,
         );
         obj.insert_property(
             NAMES["length"],
             JValue::create_number(0.0),
-            bultins::flag::PropFlag::CONFIGURABLE,
+            bultins::object_property::PropFlag::CONFIGURABLE,
         );
         obj.insert_property(
             NAMES["name"],
             JValue::create_string(name.into()),
-            bultins::flag::PropFlag::CONFIGURABLE,
+            bultins::object_property::PropFlag::CONFIGURABLE,
         );
         JObject { inner: inner }
     }
@@ -1199,17 +1199,17 @@ impl Runtime {
         obj.insert_property(
             NAMES["prototype"],
             prototype.into(),
-            bultins::flag::PropFlag::NONE,
+            bultins::object_property::PropFlag::NONE,
         );
         obj.insert_property(
             NAMES["length"],
             JValue::create_number(0.0),
-            bultins::flag::PropFlag::CONFIGURABLE,
+            bultins::object_property::PropFlag::CONFIGURABLE,
         );
         obj.insert_property(
             NAMES["name"],
             JValue::create_static_string(""),
-            bultins::flag::PropFlag::CONFIGURABLE,
+            bultins::object_property::PropFlag::CONFIGURABLE,
         );
         obj
     }

@@ -1,4 +1,6 @@
-use std::ops;
+use std::{ops, collections::HashMap};
+
+use crate::{Runtime, JValue, utils::nohasher::NoHasherBuilder};
 
 #[derive(Debug, Clone, Copy)]
 pub struct PropFlag(u8);
@@ -57,3 +59,49 @@ impl ops::BitAnd for PropFlag {
         return PropFlag(self.0 & rhs.0);
     }
 }
+
+#[derive(Hash, Clone, Copy, PartialEq, Eq)]
+pub struct PropKey(pub(crate) u32);
+
+pub trait ToProperyKey {
+    fn to_key(&self, runtime: &Runtime) -> PropKey;
+}
+
+impl ToProperyKey for PropKey {
+    fn to_key(&self, _runtime: &Runtime) -> PropKey {
+        return *self;
+    }
+}
+
+impl ToProperyKey for JValue {
+    fn to_key(&self, runtime: &Runtime) -> PropKey {
+        if let Some(s) = self.as_string() {
+            let id = runtime.register_field_name(s.as_ref());
+            return PropKey(id);
+        } else {
+            let s = self.to_string();
+            let id = runtime.register_field_name(&s);
+            return PropKey(id);
+        }
+    }
+}
+
+impl<S> ToProperyKey for S
+where
+    S: AsRef<str>,
+{
+    fn to_key(&self, runtime: &Runtime) -> PropKey {
+        let id = runtime.register_field_name(self.as_ref());
+        PropKey(id)
+    }
+}
+
+#[derive(Clone, Copy)]
+pub struct PropCell {
+    pub flag: PropFlag,
+    /// value acts as getter when flag has getter
+    pub value: JValue,
+    pub setter: JValue,
+}
+
+pub type PropMap = HashMap<PropKey, PropCell, NoHasherBuilder>;

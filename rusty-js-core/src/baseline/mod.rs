@@ -1,6 +1,6 @@
 use crate::runtime::Profiler;
 use crate::runtime::Runtime;
-use crate::types::JValue;
+use crate::value::JValue;
 
 mod inlining;
 
